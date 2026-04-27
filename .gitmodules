@@ -1,0 +1,3 @@
+[submodule "OceanWave3D-Fortran90"]
+	path = OceanWave3D-Fortran90
+	url = https://github.com/apengsigkarup/OceanWave3D-Fortran90.git

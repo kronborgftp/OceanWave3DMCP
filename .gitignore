@@ -1,0 +1,28 @@
+# macOS
+.DS_Store
+
+# Compiled binaries and objects
+*.o
+*.a
+*.mod
+bin/
+
+# Third-party library archives and sources (build locally)
+Harwell/
+Harwell.tar.gz
+SPARSKIT2/
+SPARSKIT2.tar.gz
+lapack-3.3.1/
+lapack-3.3.1.tgz
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+dist/
+*.egg-info/
+
+# Environment
+.env
