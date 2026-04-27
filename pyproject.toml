@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "oceanwave-mcp"
+version = "0.1.0"
+description = "MCP server for OceanWave3D nonlinear wave simulations"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=1.0.0",
+    "numpy>=1.24.0",
+]
+
+[project.scripts]
+oceanwave-mcp = "oceanwave_mcp.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/oceanwave_mcp"]

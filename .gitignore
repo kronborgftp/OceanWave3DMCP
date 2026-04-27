@@ -6,14 +6,29 @@
 *.a
 *.mod
 bin/
+lib/
 
-# Third-party library archives and sources (build locally)
+# Third-party library archives and sources (build locally from submodule)
 Harwell/
 Harwell.tar.gz
 SPARSKIT2/
 SPARSKIT2.tar.gz
 lapack-3.3.1/
 lapack-3.3.1.tgz
+
+# OceanWave3D runtime artifacts (stray files if binary runs in project root)
+LOG.txt
+input.inp
+OceanWave3D.end
+Kinematics*.bin
+fort.*
+bathymetry.chk
+Pdamp.chk
+relax.chk
+local.smoothing
+
+# Simulation run directories
+simulations/
 
 # Python
 __pycache__/
@@ -23,6 +38,9 @@ __pycache__/
 venv/
 dist/
 *.egg-info/
+
+# Claude Code internal settings
+.claude/
 
 # Environment
 .env
