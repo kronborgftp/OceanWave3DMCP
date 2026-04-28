@@ -62,7 +62,8 @@ OceanWaveMCP/
 │   ├── runner.py          # Runs the binary in an isolated directory
 │   └── output_parser.py   # Parses fort.1XX ASCII output → wave statistics
 ├── OceanWave3D-Fortran90/ # Git submodule — prof's Fortran source
-├── bin/OceanWave3D        # Compiled binary (macOS arm64, gitignored)
+├── bin/OceanWave3D        # Compiled binary (macOS/Linux, gitignored)
+├── bin/OceanWave3D.exe    # Compiled binary (Windows, gitignored)
 ├── simulations/           # Per-run output directories (gitignored)
 └── pyproject.toml
 ```
@@ -115,9 +116,9 @@ Re-reads a completed run and returns a table of surface elevation E and velocity
 
 ### Prerequisites
 
-- macOS (arm64 binary included)
 - Python 3.11+
 - Claude Desktop
+- gfortran (macOS/Linux) or MSYS2/MinGW-w64 (Windows)
 
 ### 1. Clone the repository
 
@@ -129,26 +130,76 @@ git submodule update --init   # pulls OceanWave3D-Fortran90 source
 
 ### 2. Build the binary
 
-The Fortran source is in `OceanWave3D-Fortran90/`. You need gfortran and the three bundled libraries (LAPACK, Harwell, SPARSKIT2):
+The Fortran source is in `OceanWave3D-Fortran90/`. Edit `OceanWave3D-Fortran90/common.mk` and set:
+- `INSTALLDIR` → `../../bin`
+- `FC` → `gfortran`
+
+Then run `make` from within `OceanWave3D-Fortran90/`.
+
+#### macOS
+
+Install gfortran via Homebrew, then build:
 
 ```bash
+brew install gcc          # provides gfortran
 cd OceanWave3D-Fortran90
-# Edit common.mk — set INSTALLDIR to ../../bin and FC to gfortran
 make
 cd ..
 ```
 
-See `OceanWave3D-Fortran90/README` for full build instructions.
+The binary is installed to `bin/OceanWave3D`.
+
+#### Linux
+
+Install gfortran via your package manager, then build:
+
+```bash
+# Debian/Ubuntu
+sudo apt install gfortran
+
+# Fedora/RHEL
+sudo dnf install gcc-gfortran
+
+cd OceanWave3D-Fortran90
+make
+cd ..
+```
+
+The binary is installed to `bin/OceanWave3D`.
+
+#### Windows
+
+The recommended approach is **MSYS2** with the MinGW-w64 toolchain:
+
+1. Install [MSYS2](https://www.msys2.org/) and open the **MSYS2 MinGW64** shell.
+2. Install gfortran and make:
+   ```bash
+   pacman -S mingw-w64-x86_64-gcc-fortran make
+   ```
+3. Build:
+   ```bash
+   cd OceanWave3D-Fortran90
+   make
+   cd ..
+   ```
+
+The binary is installed to `bin/OceanWave3D.exe`. The MCP server detects Windows automatically and looks for the `.exe` suffix.
+
+> **Alternative**: Use [WSL2](https://learn.microsoft.com/en-us/windows/wsl/) (Windows Subsystem for Linux) and follow the Linux instructions above.
+
+See `OceanWave3D-Fortran90/README` for full build details.
 
 ### 3. Install the Python package
 
 ```bash
-pip3 install -e .
+pip install -e .
 ```
 
 ### 4. Connect to Claude Desktop
 
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+The Claude Desktop config file location is platform-dependent.
+
+**macOS** — `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ```json
 {
@@ -160,7 +211,37 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 }
 ```
 
-Replace the path with the output of `which oceanwave-mcp`. Restart Claude Desktop.
+Replace the path with the output of `which oceanwave-mcp`.
+
+**Linux** — `~/.config/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "oceanwave": {
+      "command": "/home/<your-user>/.local/bin/oceanwave-mcp"
+    }
+  }
+}
+```
+
+Replace the path with the output of `which oceanwave-mcp`.
+
+**Windows** — `%APPDATA%\Claude\claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "oceanwave": {
+      "command": "C:\\Users\\<your-user>\\AppData\\Local\\Programs\\Python\\Python311\\Scripts\\oceanwave-mcp.exe"
+    }
+  }
+}
+```
+
+Replace the path with the output of `where oceanwave-mcp` in a Command Prompt.
+
+Restart Claude Desktop after editing the config.
 
 ---
 

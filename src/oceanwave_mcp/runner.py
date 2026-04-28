@@ -10,6 +10,7 @@ Each call to run_simulation():
 """
 import os
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -20,7 +21,8 @@ from .output_parser import SimulationOutput, load_output
 # Location of the compiled binary (relative to this file's package root)
 _HERE = Path(__file__).parent
 _REPO_ROOT = _HERE.parent.parent          # …/OceanWaveMCP/src  → two up
-BINARY_PATH = _REPO_ROOT / "bin" / "OceanWave3D"
+_BINARY_NAME = "OceanWave3D.exe" if sys.platform == "win32" else "OceanWave3D"
+BINARY_PATH = _REPO_ROOT / "bin" / _BINARY_NAME
 SIMULATIONS_DIR = _REPO_ROOT / "simulations"
 
 INP_FILENAME = "input.inp"
@@ -63,7 +65,7 @@ def run_simulation(inp_content: str, label: str = "") -> RunResult:
     if not binary.exists():
         raise RuntimeError(
             f"OceanWave3D binary not found at {binary}. "
-            "Please build the Fortran code first (see OceanWave3D-Fortran90/README)."
+            "Please build the Fortran code first — see README.md for platform-specific instructions."
         )
 
     # Create unique run directory
