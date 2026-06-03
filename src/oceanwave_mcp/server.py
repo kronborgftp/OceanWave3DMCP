@@ -1,18 +1,22 @@
 """
 OceanWave3D MCP Server
 
-Exposes three tools to the LLM:
+Exposes tools to the LLM:
   1. list_scenarios       — what simulations can I run?
   2. run_simulation       — run a simulation and get statistics back
   3. get_detailed_results — re-read output from a previous run
+  4. check_installation   — is OceanWave3D built and ready?
+  5. install_oceanwave3d  — build OceanWave3D from the licensed source files
+  6. installation_status  — progress of an in-flight build
 """
 import json
 from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
+from . import installer
 from .inp_builder import SCENARIOS, build_inp
-from .runner import run_simulation as _run, RunResult
+from .runner import run_simulation as _run, RunResult, BINARY_PATH
 from .output_parser import snapshots_to_text_table, load_output
 
 mcp = FastMCP("OceanWave3D")
@@ -92,6 +96,16 @@ def run_simulation(
     A text summary with run ID, wall time, and wave statistics.
     The run ID can be passed to get_detailed_results() for the full dataset.
     """
+    # If the solver isn't built yet, suggest installing it instead of failing cryptically.
+    if not BINARY_PATH.exists():
+        return (
+            "OceanWave3D isn't installed yet, so simulations can't run.\n\n"
+            "Next steps:\n"
+            "  1. Call check_installation() to see what's needed.\n"
+            "  2. Call install_oceanwave3d() to build it from your licensed source files.\n"
+            "  3. Poll installation_status() until it reports 'succeeded', then re-run this."
+        )
+
     # Build kwargs dict, omitting None values so defaults in inp_builder apply
     kwargs = {k: v for k, v in {
         "wave_height": wave_height,
@@ -166,6 +180,136 @@ def get_detailed_results(run_id: str, max_snapshots: int = 5) -> str:
         "--- Free-surface elevation table (selected snapshots) ---",
         snapshots_to_text_table(out, max_snapshots=max_snapshots),
     ]
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Tool 4: check_installation
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def check_installation() -> str:
+    """
+    Check whether OceanWave3D is built and ready to run, and report exactly
+    what (if anything) is still missing to build it.
+
+    Call this when a simulation fails because the solver isn't installed, or
+    before trying install_oceanwave3d().
+    """
+    p = installer.check_prerequisites()
+
+    if p["binary_installed"]:
+        return f"OceanWave3D is installed and ready at:\n  {p['binary_path']}"
+
+    def mark(ok: bool) -> str:
+        return "[OK]" if ok else "[MISSING]"
+
+    lines = ["OceanWave3D is NOT installed yet. Build readiness:\n"]
+
+    lines.append("Compiler toolchain:")
+    for tool, ok in p["tools"].items():
+        lines.append(f"  {mark(ok)} {tool}")
+
+    lines.append(f"\nLicensed source files (in {p['files_dir']}):")
+    for label, ok in p["tarballs"].items():
+        lines.append(f"  {mark(ok)} {installer.REQUIRED_TARBALLS[label]}")
+
+    lines.append(f"\nFortran source submodule: {mark(p['submodule_ready'])}")
+    if not p["submodule_ready"]:
+        lines.append("  Run: git submodule update --init")
+
+    lines.append("")
+    if p["missing_tools"]:
+        lines.append("Install the missing compiler tools first:")
+        lines.append(f"  {p['tool_install_hint']}")
+    if p["missing_files"]:
+        lines.append(
+            "Place the licensed tarballs in the folder above "
+            f"(or set the {installer.FILES_DIR_ENV} environment variable): "
+            + ", ".join(p["missing_files"])
+        )
+
+    if p["can_build"]:
+        lines.append("Everything needed is present — call install_oceanwave3d() to build.")
+    else:
+        lines.append("Resolve the items above, then call install_oceanwave3d().")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Tool 5: install_oceanwave3d
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def install_oceanwave3d(paid_files_dir: Optional[str] = None) -> str:
+    """
+    Build OceanWave3D from the licensed source files and install the binary.
+
+    This compiles the third-party libraries (LAPACK/BLAS, SPARSKIT2, Harwell)
+    and links the solver. It runs in the background because it takes several
+    minutes; poll installation_status() to follow progress.
+
+    Parameters
+    ----------
+    paid_files_dir : str, optional
+        Folder containing the licensed tarballs (Harwell.tar.gz, SPARSKIT2.tar.gz,
+        lapack-3.3.1.tgz). Defaults to ~/Documents/OceanWave3D_Files or the
+        OCEANWAVE3D_FILES environment variable.
+    """
+    import os
+    if paid_files_dir:
+        os.environ[installer.FILES_DIR_ENV] = paid_files_dir
+
+    result = installer.start_background_install()
+
+    if result["started"]:
+        return (
+            "Build started in the background (this takes several minutes).\n"
+            "Poll installation_status() to follow progress; it will report "
+            "'succeeded' when bin/OceanWave3D is ready."
+        )
+
+    reason = result.get("reason")
+    if reason == "already_installed":
+        return "OceanWave3D is already installed — no build needed."
+    if reason == "already_running":
+        return "A build is already running. Call installation_status() to follow it."
+
+    # missing_prerequisites — reuse the detailed readiness report.
+    return "Cannot start the build yet.\n\n" + check_installation()
+
+
+# ---------------------------------------------------------------------------
+# Tool 6: installation_status
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def installation_status() -> str:
+    """
+    Report the progress of an OceanWave3D build started by install_oceanwave3d().
+
+    States: 'running', 'succeeded', 'failed', or 'none' (no build attempted).
+    Includes the tail of the build log for diagnosing failures.
+    """
+    s = installer.installation_status()
+    state = s["state"]
+
+    if state == "none":
+        return "No installation has been started. Call install_oceanwave3d() to begin."
+
+    lines = [f"State: {state}"]
+    if s["elapsed_seconds"] is not None:
+        lines.append(f"Elapsed: {s['elapsed_seconds']:.0f} s")
+    lines.append(f"Binary installed: {s['binary_installed']}")
+    if s["error"]:
+        lines.append(f"Error: {s['error']}")
+    if s["log_tail"]:
+        lines.append("\n--- build log (tail) ---")
+        lines.append(s["log_tail"])
+
+    if state == "succeeded":
+        lines.append("\nOceanWave3D is ready — you can now run simulations.")
     return "\n".join(lines)
 
 

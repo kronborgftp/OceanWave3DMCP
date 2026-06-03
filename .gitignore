@@ -30,6 +30,9 @@ local.smoothing
 # Simulation run directories
 simulations/
 
+# Extracted/compiled third-party dependency tree (built by the installer)
+build_deps/
+
 # Python
 __pycache__/
 *.pyc

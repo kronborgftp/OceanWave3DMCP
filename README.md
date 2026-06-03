@@ -112,7 +112,22 @@ Re-reads a completed run and returns a table of surface elevation E and velocity
 
 ---
 
+### `check_installation()`
+Reports whether the OceanWave3D solver is built and ready, and — if not — exactly what is missing (compiler toolchain, licensed source files, submodule).
+
+### `install_oceanwave3d(paid_files_dir=None)`
+Builds OceanWave3D from the licensed source files (LAPACK/BLAS, SPARSKIT2, Harwell) and links the solver. Runs in the **background** (the build takes several minutes); poll `installation_status()` to follow progress.
+
+### `installation_status()`
+Reports build progress: `running`, `succeeded`, `failed`, or `none`, plus the tail of the build log for diagnosing failures.
+
+---
+
 ## Installation
+
+> **Tip:** If you have the licensed source tarballs, you can skip the manual build
+> below and let the MCP build everything for you — see
+> [Automated install via the MCP](#automated-install-via-the-mcp).
 
 ### Prerequisites
 
@@ -188,6 +203,35 @@ The binary is installed to `bin/OceanWave3D.exe`. The MCP server detects Windows
 > **Alternative**: Use [WSL2](https://learn.microsoft.com/en-us/windows/wsl/) (Windows Subsystem for Linux) and follow the Linux instructions above.
 
 See `OceanWave3D-Fortran90/README` for full build details.
+
+### Automated install via the MCP
+
+Instead of building by hand, the MCP server can compile OceanWave3D for you from
+the licensed source tarballs.
+
+**Requirements:**
+
+1. **gfortran + make** must already be installed (the server will *not* run `sudo`
+   for you). On Fedora: `sudo dnf install gcc-gfortran make`; Debian/Ubuntu:
+   `sudo apt install gfortran make`; macOS: `brew install gcc make`.
+2. The three licensed tarballs must be present in a folder — by default
+   `~/Documents/OceanWave3D_Files`, or any folder set via the
+   `OCEANWAVE3D_FILES` environment variable:
+   - `Harwell.tar.gz`
+   - `SPARSKIT2.tar.gz`
+   - `lapack-3.3.1.tgz`
+3. The Fortran submodule must be checked out: `git submodule update --init`.
+
+**Workflow (from the chat):**
+
+> *Is OceanWave3D installed?* → runs `check_installation()`
+>
+> *Install it* → runs `install_oceanwave3d()` (builds in the background)
+>
+> *How's the build going?* → runs `installation_status()`
+
+The compiled libraries land in `lib/` and the solver binary in `bin/`. The build
+log is written to `simulations/.install/install.log`.
 
 ### 3. Install the Python package
 
