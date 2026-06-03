@@ -51,6 +51,28 @@ REQUIRED_TARBALLS = {
     "lapack": "lapack-3.3.1.tgz",
 }
 
+# Where each third-party source archive can be obtained. Only Harwell/HSL is
+# license-restricted; LAPACK and SPARSKIT2 are freely available. For DTU course
+# work the whole bundle is usually provided by the OceanWave3D maintainers.
+FILE_SOURCES = {
+    "harwell": {
+        "name": "Harwell Subroutine Library (HSL)",
+        "url": "https://www.hsl.rl.ac.uk/",
+        "note": "Free for academic use (registration required); paid licence for commercial use.",
+    },
+    "sparskit": {
+        "name": "SPARSKIT2 (Y. Saad)",
+        "url": "https://www-users.cse.umn.edu/~saad/software/SPARSKIT/",
+        "note": "Freely available for research use.",
+    },
+    "lapack": {
+        "name": "LAPACK 3.3.1",
+        "url": "https://www.netlib.org/lapack/",
+        "note": "Open source (BSD); older releases are archived on Netlib.",
+    },
+}
+MAINTAINER_CONTACT = "apek@dtu.dk"  # OceanWave3D lead developer (DTU)
+
 # Legacy Fortran (1990s-2011 code) needs these to compile on gfortran 10+.
 LEGACY_FFLAGS = "-std=legacy -fallow-argument-mismatch -ffree-line-length-none"
 # OceanWave3D's own optimisation flags (adds -fno-automatic, required by the solver).
@@ -67,6 +89,46 @@ def paid_files_dir() -> Path:
     """Directory holding the licensed source tarballs."""
     env = os.environ.get(FILES_DIR_ENV)
     return Path(env).expanduser() if env else DEFAULT_FILES_DIR
+
+
+def _files_dir_readme() -> str:
+    """Drop-in instructions written into the (empty) source-files folder."""
+    lines = [
+        "Place the three OceanWave3D third-party source archives in THIS folder,",
+        "then ask Claude to install OceanWave3D (or call install_oceanwave3d()).",
+        "",
+        "Required files (exact names):",
+    ]
+    for label, fname in REQUIRED_TARBALLS.items():
+        src = FILE_SOURCES[label]
+        lines.append(f"  - {fname}")
+        lines.append(f"      {src['name']} — {src['url']}")
+        lines.append(f"      {src['note']}")
+    lines += [
+        "",
+        f"DTU course work: the bundle is usually provided by the OceanWave3D",
+        f"maintainers — contact {MAINTAINER_CONTACT}.",
+        "",
+        "To use a different folder, set the OCEANWAVE3D_FILES environment variable.",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def ensure_files_dir() -> Path:
+    """
+    Make sure the source-files folder exists so the user has an obvious place to
+    drop the archives. Creates it (and a README explaining what goes inside) when
+    missing, then returns the path.
+    """
+    d = paid_files_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    readme = d / "README_PUT_FILES_HERE.txt"
+    if not readme.exists():
+        try:
+            readme.write_text(_files_dir_readme())
+        except OSError:
+            pass
+    return d
 
 
 def _system_install_hint() -> str:
@@ -94,7 +156,9 @@ def check_prerequisites() -> dict:
     """
     tools = {name: shutil.which(name) is not None for name in REQUIRED_TOOLS}
 
-    files_dir = paid_files_dir()
+    # Create the drop-in folder up front so there's always a clear place for the
+    # user to put the archives, even on the very first check.
+    files_dir = ensure_files_dir()
     tarballs = {
         label: (files_dir / fname).exists()
         for label, fname in REQUIRED_TARBALLS.items()
@@ -104,7 +168,8 @@ def check_prerequisites() -> dict:
     binary_installed = BINARY_PATH.exists()
 
     missing_tools = [t for t, ok in tools.items() if not ok]
-    missing_files = [REQUIRED_TARBALLS[l] for l, ok in tarballs.items() if not ok]
+    missing_file_labels = [l for l, ok in tarballs.items() if not ok]
+    missing_files = [REQUIRED_TARBALLS[l] for l in missing_file_labels]
 
     can_build = (
         not missing_tools
@@ -119,6 +184,9 @@ def check_prerequisites() -> dict:
         "files_dir": str(files_dir),
         "tarballs": tarballs,
         "missing_files": missing_files,
+        "missing_file_labels": missing_file_labels,
+        "file_sources": FILE_SOURCES,
+        "maintainer_contact": MAINTAINER_CONTACT,
         "submodule_ready": submodule_ready,
         "binary_installed": binary_installed,
         "binary_path": str(BINARY_PATH),

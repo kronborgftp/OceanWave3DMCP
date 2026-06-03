@@ -210,7 +210,7 @@ def check_installation() -> str:
     for tool, ok in p["tools"].items():
         lines.append(f"  {mark(ok)} {tool}")
 
-    lines.append(f"\nLicensed source files (in {p['files_dir']}):")
+    lines.append(f"\nThird-party source files (folder: {p['files_dir']}):")
     for label, ok in p["tarballs"].items():
         lines.append(f"  {mark(ok)} {installer.REQUIRED_TARBALLS[label]}")
 
@@ -224,9 +224,23 @@ def check_installation() -> str:
         lines.append(f"  {p['tool_install_hint']}")
     if p["missing_files"]:
         lines.append(
-            "Place the licensed tarballs in the folder above "
-            f"(or set the {installer.FILES_DIR_ENV} environment variable): "
-            + ", ".join(p["missing_files"])
+            f"I've created this folder for you — drop the missing files into it:\n"
+            f"  {p['files_dir']}"
+        )
+        lines.append("\nWhere to get each missing file:")
+        for label in p["missing_file_labels"]:
+            src = p["file_sources"][label]
+            fname = installer.REQUIRED_TARBALLS[label]
+            lines.append(f"  - {fname}  ({src['name']})")
+            lines.append(f"      {src['url']}")
+            lines.append(f"      {src['note']}")
+        lines.append(
+            f"\nDTU course work: the bundle is usually provided by the OceanWave3D "
+            f"maintainers — contact {p['maintainer_contact']}."
+        )
+        lines.append(
+            f"(To use a different folder, set the {installer.FILES_DIR_ENV} "
+            "environment variable.)"
         )
 
     if p["can_build"]:
