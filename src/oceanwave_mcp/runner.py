@@ -90,11 +90,21 @@ def run_simulation(inp_content: str, label: str = "") -> RunResult:
             "Please build the Fortran code first — see README.md for platform-specific instructions."
         )
 
-    # Create unique run directory
+    # Create unique run directory. Run IDs are second-resolution timestamps, so two
+    # runs started within the same second would collide — uniquify with a numeric
+    # suffix instead of crashing with FileExistsError.
     SIMULATIONS_DIR.mkdir(exist_ok=True)
-    run_id = _make_run_id(label)
-    run_dir = SIMULATIONS_DIR / run_id
-    run_dir.mkdir()
+    base_id = _make_run_id(label)
+    run_id = base_id
+    n = 1
+    while True:
+        run_dir = SIMULATIONS_DIR / run_id
+        try:
+            run_dir.mkdir()
+            break
+        except FileExistsError:
+            n += 1
+            run_id = f"{base_id}_{n}"
 
     inp_path = run_dir / INP_FILENAME
     inp_path.write_text(inp_content)
