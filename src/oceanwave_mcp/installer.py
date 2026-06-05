@@ -262,6 +262,10 @@ def _run(cmd, cwd: Path, log, env: Optional[dict] = None) -> None:
     if resolved:
         cmd = [resolved, *cmd[1:]]
     _log(log, f"\n$ (cd {cwd}) {' '.join(cmd)}")
+    # On Windows run each build tool with no console window: prevents console
+    # windows flashing when the build is launched from the GUI, and keeps console
+    # control events contained instead of bubbling up to any shared console.
+    creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
     proc = subprocess.run(
         cmd,
         cwd=str(cwd),
@@ -269,6 +273,7 @@ def _run(cmd, cwd: Path, log, env: Optional[dict] = None) -> None:
         stderr=subprocess.STDOUT,
         env=env,
         text=True,
+        creationflags=creationflags,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"Command failed ({proc.returncode}): {' '.join(cmd)} (cwd={cwd})")
@@ -478,12 +483,29 @@ def start_background_install() -> dict:
 
     INSTALL_STATE_DIR.mkdir(parents=True, exist_ok=True)
     log = open(LOG_FILE, "w")  # fresh log per run
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "oceanwave_mcp.installer", "--build"],
+    # Detach the build so it outlives this call and — crucially on Windows — shares
+    # NO console or process group with the (MCP server) parent. Otherwise a console
+    # control event (CTRL_C/CTRL_BREAK) emitted by the build's child tools (make ->
+    # gfortran -> ar are all console apps) propagates to the parent's process group
+    # and kills the MCP server with KeyboardInterrupt mid-build, which the desktop
+    # app reports as "Server disconnected". start_new_session is POSIX-only (ignored
+    # on Windows), so it does not provide this isolation by itself.
+    popen_kwargs = dict(
         stdout=log,
         stderr=subprocess.STDOUT,
-        start_new_session=True,
+        stdin=subprocess.DEVNULL,  # don't inherit the server's stdin pipe
         cwd=str(_REPO_ROOT),
+    )
+    if sys.platform == "win32":
+        popen_kwargs["creationflags"] = (
+            subprocess.DETACHED_PROCESS  # no shared console
+            | subprocess.CREATE_NEW_PROCESS_GROUP  # immune to the server's CTRL events
+        )
+    else:
+        popen_kwargs["start_new_session"] = True  # POSIX: setsid()
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "oceanwave_mcp.installer", "--build"],
+        **popen_kwargs,
     )
     _write_status(state="running", pid=proc.pid, started=time.time())
     return {"started": True, "pid": proc.pid, "prereq": prereq}
