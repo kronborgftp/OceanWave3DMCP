@@ -26,7 +26,12 @@ BINARY_PATH = _REPO_ROOT / "bin" / _BINARY_NAME
 SIMULATIONS_DIR = _REPO_ROOT / "simulations"
 
 INP_FILENAME = "input.inp"
-TIMEOUT_SECONDS = 300  # 5-minute hard limit per simulation
+# Hard wall-clock limit per simulation. Kept BELOW the Claude Desktop MCP client's
+# ~240 s request timeout so a slow or diverging run returns a clean "timed out"
+# RunResult instead of the client aborting the tool call with "request expired /
+# connection interrupted". Override via OCEANWAVE3D_SIM_TIMEOUT for heavier batch runs
+# (only safe with a client that has a longer request timeout than this).
+TIMEOUT_SECONDS = int(os.environ.get("OCEANWAVE3D_SIM_TIMEOUT", "180"))
 
 
 def _run_env() -> dict | None:
@@ -103,6 +108,11 @@ def run_simulation(inp_content: str, label: str = "") -> RunResult:
             text=True,
             timeout=TIMEOUT_SECONDS,
             env=_run_env(),
+            # Don't inherit the MCP server's stdin pipe, and on Windows run the
+            # console binary with no console window so it neither flashes a window
+            # nor lets console control events reach the (GUI-launched) server.
+            stdin=subprocess.DEVNULL,
+            creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0),
         )
         elapsed = time.monotonic() - t0
         stdout = result.stdout
