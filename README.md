@@ -213,7 +213,15 @@ the licensed source tarballs.
 
 1. **gfortran + make** must already be installed (the server will *not* run `sudo`
    for you). On Fedora: `sudo dnf install gcc-gfortran make`; Debian/Ubuntu:
-   `sudo apt install gfortran make`; macOS: `brew install gcc make`.
+   `sudo apt install gfortran make`; macOS: `brew install gcc make`; Windows:
+   install MSYS2 and run `pacman -S mingw-w64-x86_64-gcc-fortran make`.
+
+   On **Windows** the automated installer finds the MSYS2 toolchain itself: it
+   prepends `C:\msys64\mingw64\bin` (gfortran/gcc/ar/ranlib) and `C:\msys64\usr\bin`
+   (`make` plus the Unix shell utilities the legacy makefiles invoke) to the build
+   subprocess PATH — without touching your system PATH. If MSYS2 lives elsewhere,
+   set `OCEANWAVE3D_MSYS2_ROOT` to its root. The resulting `bin\OceanWave3D.exe` is
+   statically linked, so it runs without MSYS2 on PATH.
 2. Three third-party source archives must be present in a folder — by default
    `~/Documents/OceanWave3D_Files`, or any folder set via the
    `OCEANWAVE3D_FILES` environment variable. **The MCP creates this folder for

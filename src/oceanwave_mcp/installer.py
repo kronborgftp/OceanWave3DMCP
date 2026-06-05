@@ -82,6 +82,53 @@ REQUIRED_TOOLS = ("gfortran", "make", "ar", "ranlib")
 
 
 # ---------------------------------------------------------------------------
+# Windows / MSYS2 toolchain discovery
+# ---------------------------------------------------------------------------
+# On Windows the Fortran toolchain ships via MSYS2. gfortran/gcc/ar/ranlib live
+# in mingw64\bin; `make` and the Unix shell utilities the legacy makefiles rely
+# on (sh, mkdir, mv, cp, rm, ls) live in usr\bin. Both directories must be on
+# PATH for the build, and mingw64\bin must also be reachable at *run* time so the
+# linked OceanWave3D.exe can load its libgfortran/libgcc runtime DLLs. We discover
+# these dirs and prepend them to a *copy* of PATH used only for build subprocesses
+# rather than mutating the user's system PATH — keeping the "never modify the
+# system" design intact. Set OCEANWAVE3D_MSYS2_ROOT to override the default root.
+MSYS2_ROOT_ENV = "OCEANWAVE3D_MSYS2_ROOT"
+DEFAULT_MSYS2_ROOT = Path(r"C:\msys64")
+
+
+def msys2_bin_dirs() -> list[Path]:
+    """MSYS2 toolchain bin dirs to add to PATH (Windows only; [] elsewhere)."""
+    if sys.platform != "win32":
+        return []
+    root = Path(os.environ.get(MSYS2_ROOT_ENV, str(DEFAULT_MSYS2_ROOT)))
+    candidates = [root / "mingw64" / "bin", root / "usr" / "bin"]
+    return [d for d in candidates if d.exists()]
+
+
+def _augmented_path() -> str:
+    """PATH with the MSYS2 toolchain dirs prepended (no-op off Windows)."""
+    existing = os.environ.get("PATH", "")
+    parts = [str(d) for d in msys2_bin_dirs()]
+    return os.pathsep.join(parts + [existing]) if parts else existing
+
+
+def _build_env() -> dict:
+    """Environment for build subprocesses, with the toolchain on PATH."""
+    env = os.environ.copy()
+    env["PATH"] = _augmented_path()
+    return env
+
+
+def _mk(path) -> str:
+    """Normalise a path for injection into makefiles / mingw tool arguments.
+
+    mingw `make` and gfortran accept forward-slash Windows paths (C:/foo) but
+    treat backslashes as shell/make escape characters, so always forward-slash.
+    """
+    return str(path).replace("\\", "/")
+
+
+# ---------------------------------------------------------------------------
 # Locating the paid source files
 # ---------------------------------------------------------------------------
 
@@ -154,7 +201,8 @@ def check_prerequisites() -> dict:
     """
     Inspect everything needed to build OceanWave3D and return a structured report.
     """
-    tools = {name: shutil.which(name) is not None for name in REQUIRED_TOOLS}
+    search_path = _augmented_path()
+    tools = {name: shutil.which(name, path=search_path) is not None for name in REQUIRED_TOOLS}
 
     # Create the drop-in folder up front so there's always a clear place for the
     # user to put the archives, even on the very first check.
@@ -205,6 +253,14 @@ def _log(log, msg: str) -> None:
 
 def _run(cmd, cwd: Path, log, env: Optional[dict] = None) -> None:
     """Run a build command, streaming combined output to the log. Raise on failure."""
+    if env is None:
+        env = _build_env()  # ensure the MSYS2 toolchain is on PATH (Windows)
+    # On Windows the executable is resolved against the *parent* process PATH at
+    # CreateProcess time, not the child env's PATH — so a toolchain on env["PATH"]
+    # alone is not enough. Resolve the program to an absolute path ourselves.
+    resolved = shutil.which(cmd[0], path=env.get("PATH"))
+    if resolved:
+        cmd = [resolved, *cmd[1:]]
     _log(log, f"\n$ (cd {cwd}) {' '.join(cmd)}")
     proc = subprocess.run(
         cmd,
@@ -270,14 +326,14 @@ def build_harwell(files_dir: Path, log) -> None:
     LIB_DIR.mkdir(parents=True, exist_ok=True)
     _run(
         ["make", "FF=gfortran", f"FFLAGS=-O3 {LEGACY_FFLAGS} -fno-automatic",
-         f"installd={LIB_DIR}"],
+         f"installd={_mk(LIB_DIR)}"],
         cwd=src, log=log,
     )
     if not (LIB_DIR / "libharwell.a").exists():
         # Fallback: archive whatever objects were produced.
         objs = [str(o.name) for o in src.glob("*.o")]
         if objs:
-            _run(["ar", "-rc", str(LIB_DIR / "libharwell.a"), *objs], cwd=src, log=log)
+            _run(["ar", "-rc", _mk(LIB_DIR / "libharwell.a"), *objs], cwd=src, log=log)
     if not (LIB_DIR / "libharwell.a").exists():
         raise RuntimeError("Harwell build did not produce libharwell.a")
 
@@ -292,15 +348,20 @@ def build_oceanwave3d(log) -> None:
     # the in-file value) and create it first since the Release target doesn't.
     build_dir = SUBMODULE_DIR / "build"
     build_dir.mkdir(parents=True, exist_ok=True)
+    optflags = OW3D_OPTFLAGS
+    if sys.platform == "win32":
+        # Statically link the mingw runtime so OceanWave3D.exe is self-contained
+        # and runs without mingw64\bin on PATH (no loose libgfortran/libgcc DLLs).
+        optflags += " -static"
     _run(
         ["make", "Release",
          "FC=gfortran",
-         f"BUILDDIR={build_dir}",
-         f"INSTALLDIR={BIN_DIR}",
+         f"BUILDDIR={_mk(build_dir)}",
+         f"INSTALLDIR={_mk(BIN_DIR)}",
          f"PROGNAME={binary_name}",
-         f"LIBDIRS=-L{LIB_DIR}",
+         f"LIBDIRS=-L{_mk(LIB_DIR)}",
          "LINLIB=-lharwell -lskit -llapack -lblas",
-         f"OPTFLAGS={OW3D_OPTFLAGS}"],
+         f"OPTFLAGS={optflags}"],
         cwd=SUBMODULE_DIR, log=log,
     )
     if not BINARY_PATH.exists():
@@ -456,6 +517,9 @@ def installation_status() -> dict:
 # ---------------------------------------------------------------------------
 
 def _build_main() -> int:
+    # Normally start_background_install() creates this dir before spawning us, but
+    # `python -m oceanwave_mcp.installer --build` may be run directly, so ensure it.
+    INSTALL_STATE_DIR.mkdir(parents=True, exist_ok=True)
     with open(LOG_FILE, "a") as log:
         try:
             build_all(log)

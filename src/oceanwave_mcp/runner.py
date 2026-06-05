@@ -29,6 +29,23 @@ INP_FILENAME = "input.inp"
 TIMEOUT_SECONDS = 300  # 5-minute hard limit per simulation
 
 
+def _run_env() -> dict | None:
+    """Environment for launching the binary.
+
+    The build links OceanWave3D.exe statically, but as a safety net on Windows we
+    also put the MSYS2 mingw64\\bin dir on PATH so any dynamically-loaded
+    libgfortran/libgcc runtime DLLs resolve. No-op (returns None) off Windows.
+    """
+    if sys.platform != "win32":
+        return None
+    mingw_bin = Path(os.environ.get("OCEANWAVE3D_MSYS2_ROOT", r"C:\msys64")) / "mingw64" / "bin"
+    if not mingw_bin.exists():
+        return None
+    env = os.environ.copy()
+    env["PATH"] = str(mingw_bin) + os.pathsep + env.get("PATH", "")
+    return env
+
+
 @dataclass
 class RunResult:
     run_id: str
@@ -85,6 +102,7 @@ def run_simulation(inp_content: str, label: str = "") -> RunResult:
             capture_output=True,
             text=True,
             timeout=TIMEOUT_SECONDS,
+            env=_run_env(),
         )
         elapsed = time.monotonic() - t0
         stdout = result.stdout
