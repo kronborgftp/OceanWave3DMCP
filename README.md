@@ -214,12 +214,22 @@ the licensed source tarballs.
 1. **gfortran + make** must already be installed (the server will *not* run `sudo`
    for you). On Fedora: `sudo dnf install gcc-gfortran make`; Debian/Ubuntu:
    `sudo apt install gfortran make`; macOS: `brew install gcc make`.
-2. The three licensed tarballs must be present in a folder — by default
+2. Three third-party source archives must be present in a folder — by default
    `~/Documents/OceanWave3D_Files`, or any folder set via the
-   `OCEANWAVE3D_FILES` environment variable:
-   - `Harwell.tar.gz`
-   - `SPARSKIT2.tar.gz`
-   - `lapack-3.3.1.tgz`
+   `OCEANWAVE3D_FILES` environment variable. **The MCP creates this folder for
+   you** (with a `README_PUT_FILES_HERE.txt` listing what to drop in) the first
+   time you run `check_installation()`:
+   - `Harwell.tar.gz` — Harwell Subroutine Library (HSL), <https://www.hsl.rl.ac.uk/>
+     (free for academic use; licensed for commercial use)
+   - `SPARSKIT2.tar.gz` — SPARSKIT2 by Y. Saad,
+     <https://www-users.cse.umn.edu/~saad/software/SPARSKIT/> (free for research)
+   - `lapack-3.3.1.tgz` — LAPACK 3.3.1, <https://www.netlib.org/lapack/>
+     (open source)
+
+   Only Harwell/HSL is licence-restricted; LAPACK and SPARSKIT2 are freely
+   available. For DTU course work the bundle is usually provided by the
+   OceanWave3D maintainers (apek@dtu.dk). `check_installation()` reports exactly
+   which files are missing and where to get each.
 3. The Fortran submodule must be checked out: `git submodule update --init`.
 
 **Workflow (from the chat):**
