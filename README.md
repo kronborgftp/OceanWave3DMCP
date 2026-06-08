@@ -60,7 +60,8 @@ OceanWaveMCP/
 │   ├── server.py          # FastMCP server — exposes 3 tools to the LLM
 │   ├── inp_builder.py     # Translates human parameters → .inp file
 │   ├── runner.py          # Runs the binary in an isolated directory
-│   └── output_parser.py   # Parses fort.1XX ASCII output → wave statistics
+│   ├── output_parser.py   # Parses fort.1XX ASCII output → wave statistics
+│   └── installer.py       # Builds OceanWave3D + deps from licensed source tarballs
 ├── OceanWave3D-Fortran90/ # Git submodule — prof's Fortran source
 ├── bin/OceanWave3D        # Compiled binary (macOS/Linux, gitignored)
 ├── bin/OceanWave3D.exe    # Compiled binary (Windows, gitignored)
@@ -251,6 +252,47 @@ the licensed source tarballs.
 The compiled libraries land in `lib/` and the solver binary in `bin/`. The build
 log is written to `simulations/.install/install.log`.
 
+#### How the automated build works (`installer.py`)
+
+The build chain compiles four components in dependency order, all with legacy
+Fortran flags (`-std=legacy -fallow-argument-mismatch -ffree-line-length-none`)
+so 1990s–2011 code compiles cleanly on modern gfortran:
+
+1. **LAPACK + BLAS** (`lapack-3.3.1.tgz`) → `lib/liblapack.a`, `lib/libblas.a`
+2. **SPARSKIT2** (`SPARSKIT2.tar.gz`) → `lib/libskit.a`
+3. **Harwell** (`Harwell.tar.gz`) → `lib/libharwell.a`
+4. **OceanWave3D** (the submodule) → `bin/OceanWave3D` (or `.exe` on Windows,
+   statically linked so it runs without MSYS2 on PATH)
+
+Each library step is **idempotent** — if its `.a` already exists in `lib/`, the
+step is skipped, so a retry after fixing a later failure doesn't recompile
+LAPACK from scratch.
+
+Because the full build takes several minutes, `install_oceanwave3d()` launches
+it as a **detached background process** (`python -m oceanwave_mcp.installer
+--build`) rather than blocking the tool call. On Windows this is more than a
+convenience: `make → gfortran → ar` are console apps, and without isolation a
+console control event (Ctrl+C/Ctrl+Break) sent to one of them propagates to the
+MCP server's process group and kills the server mid-build (seen by Claude
+Desktop as "Server disconnected"). The installer detaches with
+`DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` on Windows and `start_new_session`
+(setsid) on POSIX so the build shares no console or process group with the
+server.
+
+Progress is tracked via two files under `simulations/.install/`:
+- `status.json` — machine-readable state (`running` / `succeeded` / `failed`),
+  PID, and timestamps; `installation_status()` reconciles a stale "running"
+  record (e.g. after a crash) by checking whether the binary now exists or the
+  PID is still alive.
+- `install.log` — the combined stdout/stderr of every build command, tailed by
+  `installation_status()` for diagnosing failures.
+
+You can also drive the builder directly from a shell for debugging:
+```bash
+python -m oceanwave_mcp.installer            # prints a prerequisite report (JSON)
+python -m oceanwave_mcp.installer --build    # runs the build in the foreground
+```
+
 ### 3. Install the Python package
 
 ```bash
@@ -335,6 +377,9 @@ Each run creates an isolated directory under `simulations/`. OceanWave3D writes 
 
 **Minimum grid requirements**  
 The default finite-difference stencil uses order γ=3, requiring at least Nz=7 vertical layers. The inp builder enforces a minimum of Nz=9.
+
+**Run timeout**  
+Claude Desktop aborts an MCP tool call after roughly 240 s. `run_simulation` kills a runaway solve (e.g. a steep or over-resolved case that hits the solver's max iterations) after `TIMEOUT_SECONDS` (default **180 s**, overridable via `OCEANWAVE3D_SIM_TIMEOUT`) and returns a clean "Simulation timed out" result well inside that window, instead of letting the client time out the whole connection.
 
 ---
 
