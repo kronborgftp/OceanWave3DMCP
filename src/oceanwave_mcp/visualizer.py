@@ -5,8 +5,8 @@ All plots are derived directly from the solver's ASCII output files — no
 interpolation, no guessing, no Claude-generated data. Same fort files always
 produce the same pixels.
 
-Claude Desktop only renders image/png inline. GIFs are saved to disk; the
-tool always returns a PNG for in-chat display.
+The tool returns the image inline: an animated GIF cycling through all
+recorded snapshots by default, or a single PNG of the final snapshot.
 """
 import importlib.util
 import io
@@ -24,8 +24,6 @@ _STILL_COLOR = "#999999"
 _GRID_ALPHA  = 0.3
 _DPI         = 100
 _GIF_FPS     = 5
-_MAX_FRAMES  = 20
-_N_PANELS    = 6   # panels in the inline PNG grid
 
 
 def _ensure_deps() -> None:
@@ -58,9 +56,9 @@ def _time_per_snapshot(run_dir: Path) -> float:
 
 
 def _y_lim(out: SimulationOutput) -> tuple:
-    abs_max = max(abs(out.max_elevation), abs(out.min_elevation))
-    margin  = abs_max * 0.20
-    return (out.min_elevation - margin, out.max_elevation + margin)
+    """±120 % of the global peak across all snapshots — fixed per run."""
+    peak = max(abs(out.max_elevation), abs(out.min_elevation))
+    return (-1.2 * peak, 1.2 * peak)
 
 
 def _render_ax(ax, snap_x, snap_E, t_seconds, snap_idx, total_snaps, y_lim, plt, ticker):
@@ -71,70 +69,56 @@ def _render_ax(ax, snap_x, snap_E, t_seconds, snap_idx, total_snaps, y_lim, plt,
     ax.set_ylim(y_lim[0], y_lim[1])
     ax.set_xlabel("x [m]", fontsize=8)
     ax.set_ylabel("η [m]", fontsize=8)
-    ax.set_title(f"t = {t_seconds:.1f} s", fontsize=8)
+    ax.set_title(
+        f"t = {t_seconds:.2f} s   (snapshot {snap_idx + 1}/{total_snaps})",
+        fontsize=10,
+    )
     ax.grid(True, alpha=_GRID_ALPHA)
     ax.yaxis.set_major_formatter(ticker.FormatStrFormatter("%.3f"))
     ax.tick_params(labelsize=7)
 
 
-def generate_panel_png(run_dir: str, n_panels: int = _N_PANELS) -> bytes:
-    """
-    Generate a multi-panel PNG showing n_panels evenly-spaced time snapshots.
+def _frame_png(out: SimulationOutput, i: int, dt_snap: float, y_lim: tuple,
+               plt, ticker) -> io.BytesIO:
+    """Render snapshot i as a PNG and return the buffer."""
+    snap = out.snapshots[i]
+    fig, ax = plt.subplots(figsize=(10, 4), dpi=_DPI)
+    _render_ax(ax, snap.x, snap.E, i * dt_snap, i, len(out.snapshots),
+               y_lim, plt, ticker)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight", dpi=_DPI)
+    plt.close(fig)
+    buf.seek(0)
+    return buf
 
-    Returns raw PNG bytes. This is the primary inline-display format because
-    Claude Desktop only renders image/png from MCP tool results.
-    """
+
+def _load(run_dir: str) -> SimulationOutput:
+    out: SimulationOutput = load_output(run_dir)
+    if not out.snapshots:
+        raise ValueError(f"No fort.1XX snapshot files found in {run_dir}")
+    return out
+
+
+def generate_final_png(run_dir: str) -> bytes:
+    """Single PNG of the final recorded snapshot. Returns raw PNG bytes."""
     _ensure_deps()
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import matplotlib.ticker as ticker
 
-    out: SimulationOutput = load_output(run_dir)
-    if not out.snapshots:
-        raise ValueError(f"No fort.1XX snapshot files found in {run_dir}")
-
+    out     = _load(run_dir)
     dt_snap = _time_per_snapshot(Path(run_dir))
-    n       = len(out.snapshots)
-    panels  = min(n_panels, n)
-
-    step    = max(1, n // panels)
-    indices = list(range(0, n, step))[:panels]
-    yl      = _y_lim(out)
-
-    cols = 3
-    rows = (panels + cols - 1) // cols
-    fig, axes = plt.subplots(rows, cols, figsize=(cols * 5, rows * 3), dpi=_DPI)
-    axes_flat = axes.flat if hasattr(axes, "flat") else [axes]
-
-    for ax, i in zip(axes_flat, indices):
-        snap = out.snapshots[i]
-        _render_ax(ax, snap.x, snap.E, i * dt_snap, i, n, yl, plt, ticker)
-
-    # hide any unused subplot slots
-    for ax in list(axes_flat)[len(indices):]:
-        ax.set_visible(False)
-
-    fig.suptitle(
-        f"Surface elevation η(x, t)  —  {panels} snapshots from {n} total\n"
-        f"run: {Path(run_dir).name}",
-        fontsize=10,
-    )
-    fig.tight_layout()
-
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", bbox_inches="tight", dpi=_DPI)
-    plt.close(fig)
-    buf.seek(0)
-    return buf.read()
+    i       = len(out.snapshots) - 1
+    return _frame_png(out, i, dt_snap, _y_lim(out), plt, ticker).read()
 
 
-def generate_and_save_gif(run_dir: str, max_frames: int = _MAX_FRAMES) -> Path:
+def generate_gif_bytes(run_dir: str) -> bytes:
     """
-    Generate an animated GIF and save it to run_dir/animation.gif.
+    Animated GIF cycling through all recorded time snapshots.
 
-    Returns the Path to the saved file. The GIF is not returned inline because
-    Claude Desktop does not render image/gif from MCP tool results.
+    Returns raw GIF bytes. Every frame is read directly from the fort.1XX
+    files — nothing is interpolated or estimated.
     """
     _ensure_deps()
     import matplotlib
@@ -143,34 +127,18 @@ def generate_and_save_gif(run_dir: str, max_frames: int = _MAX_FRAMES) -> Path:
     import matplotlib.ticker as ticker
     from PIL import Image as PILImage
 
-    out: SimulationOutput = load_output(run_dir)
-    if not out.snapshots:
-        raise ValueError(f"No fort.1XX snapshot files found in {run_dir}")
-
+    out     = _load(run_dir)
     dt_snap = _time_per_snapshot(Path(run_dir))
-    n       = len(out.snapshots)
-    step    = max(1, n // max_frames)
-    indices = list(range(0, n, step))[:max_frames]
     yl      = _y_lim(out)
 
-    frames = []
-    for i in indices:
-        snap = out.snapshots[i]
-        fig, ax = plt.subplots(figsize=(10, 4), dpi=_DPI)
-        _render_ax(ax, snap.x, snap.E, i * dt_snap, i, n, yl, plt, ticker)
-        ax.set_title(
-            f"t = {i * dt_snap:.2f} s   (snapshot {i + 1}/{n})",
-            fontsize=10,
-        )
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", bbox_inches="tight", dpi=_DPI)
-        plt.close(fig)
-        buf.seek(0)
-        frames.append(PILImage.open(buf).copy())
+    frames = [
+        PILImage.open(_frame_png(out, i, dt_snap, yl, plt, ticker)).copy()
+        for i in range(len(out.snapshots))
+    ]
 
-    gif_path = Path(run_dir) / "animation.gif"
+    buf = io.BytesIO()
     frames[0].save(
-        gif_path,
+        buf,
         format="GIF",
         save_all=True,
         append_images=frames[1:],
@@ -178,4 +146,11 @@ def generate_and_save_gif(run_dir: str, max_frames: int = _MAX_FRAMES) -> Path:
         loop=0,
         optimize=False,
     )
+    return buf.getvalue()
+
+
+def generate_and_save_gif(run_dir: str) -> Path:
+    """Generate the animated GIF and save it to run_dir/animation.gif."""
+    gif_path = Path(run_dir) / "animation.gif"
+    gif_path.write_bytes(generate_gif_bytes(run_dir))
     return gif_path

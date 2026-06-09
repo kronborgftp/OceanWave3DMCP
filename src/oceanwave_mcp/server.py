@@ -6,15 +6,27 @@ Exposes tools to the LLM:
   2. run_simulation        — run a simulation and get statistics back
   3. get_detailed_results  — re-read output from a previous run
   4. generate_visualization — render GIF/PNG from solver output (not Claude-generated)
-  5. check_installation    — is OceanWave3D built and ready?
-  6. install_oceanwave3d   — build OceanWave3D from the licensed source files
-  7. installation_status   — progress of an in-flight build
+  5. get_visualization_link — localhost browser link (use for animations: chat
+                              clients render inline PNG but not animated GIF)
+  6. check_installation    — is OceanWave3D built and ready?
+  7. install_oceanwave3d   — build OceanWave3D from the licensed source files
+  8. installation_status   — progress of an in-flight build
+  9. check_version         — which build of this server is running?
 """
 import json
 from pathlib import Path
 from typing import Optional
 
 from mcp.server.fastmcp import FastMCP, Image
+
+# Support running this file directly (python server.py / VSCode Run) in
+# addition to the installed `oceanwave-mcp` entry point: relative imports
+# need the package context, so restore it when launched as a plain script.
+if __package__ in (None, ""):
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    __package__ = "oceanwave_mcp"
 
 from . import installer
 from .inp_builder import SCENARIOS, build_inp
@@ -46,8 +58,15 @@ The recap is a self-contained engineering document. Your job is to display it
 unchanged. Any text you add is wrong by definition.
 
 ━━━ VISUALIZATION ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-• To show a wave plot, call generate_visualization(run_id="...").
-• The image returned IS the visualization — embed it directly, add nothing.
+• Still image in chat: call generate_visualization(run_id="...", format="png").
+  The returned PNG IS the visualization — embed it directly, add nothing.
+• Animation: chat clients can NOT render animated GIFs inline. Call
+  get_visualization_link(run_id="...") and give the user the returned
+  http://127.0.0.1:... URL as a clickable markdown link.
+• The image or link MUST appear in your final, user-visible response.
+  NEVER show it only inside a thinking/reasoning block — the user cannot
+  see content there. If you called the tool while reasoning, repeat the
+  image/link in the visible response.
 • Do NOT write matplotlib, Chart.js, or any analytical wave code.
   Claude-generated plots are wrong — they guess the shape instead of reading
   the solver output.
@@ -58,6 +77,11 @@ unchanged. Any text you add is wrong by definition.
 """
 
 mcp = FastMCP("OceanWave3D", instructions=_SERVER_INSTRUCTIONS)
+
+# Bump these whenever you change the server, then verify with check_version()
+# that Claude Desktop picked up the new code.
+_VERSION = "0.3"
+_VERSION_MESSAGE = "Added get_visualization_link: open animations in the browser"
 
 
 # ---------------------------------------------------------------------------
@@ -356,22 +380,27 @@ def get_detailed_results(run_id: str, max_snapshots: int = 5) -> str:
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def generate_visualization(run_id: str) -> Image:
+def generate_visualization(run_id: str, format: str = "gif") -> Image:
     """
     Generate a visualization from a completed OceanWave3D simulation run.
 
     Reads the fort.1XX solver output files directly and renders them with
     matplotlib. The image is derived entirely from solver data — no guessing,
-    no interpolation. Same run always produces the same image.
+    no interpolation. Same run_id always produces the same image.
 
-    Returns a PNG panel showing evenly-spaced time snapshots embedded directly
-    in the chat. Also saves an animated GIF to the run directory for external
-    viewing. Do not generate a separate chart — this IS the visualization.
+    Do not generate a separate chart — this IS the visualization.
 
     Parameters
     ----------
     run_id : str
         The run ID returned by run_simulation().
+    format : str
+        "gif" (default) — animated GIF cycling through all recorded time
+        snapshots. "png" — single PNG of the final snapshot.
+
+    Note: chat clients render the returned PNG inline but generally can NOT
+    render animated GIFs inline. To show the user an animation, prefer
+    get_visualization_link() and present the URL it returns.
     """
     from .runner import SIMULATIONS_DIR
     run_dir = SIMULATIONS_DIR / run_id
@@ -380,18 +409,19 @@ def generate_visualization(run_id: str) -> Image:
             f"Run directory '{run_id}' not found. "
             "Check the run_id returned by run_simulation()."
         )
+    if format not in ("gif", "png"):
+        raise ValueError(f"format must be 'gif' or 'png', got '{format}'")
 
     from . import visualizer  # lazy — keeps matplotlib out of startup path
 
     try:
-        # Always return PNG — Claude Desktop only renders image/png inline.
-        # GIF is saved to disk for external viewing.
-        png_data = visualizer.generate_panel_png(str(run_dir))
-        try:
-            gif_path = visualizer.generate_and_save_gif(str(run_dir))
-        except Exception:  # noqa: BLE001
-            gif_path = None  # GIF is bonus; don't let it fail the whole call
-        return Image(data=png_data, format="png")
+        if format == "png":
+            return Image(data=visualizer.generate_final_png(str(run_dir)),
+                         format="png")
+        gif_data = visualizer.generate_gif_bytes(str(run_dir))
+        # Keep a copy on disk for external viewing
+        (run_dir / "animation.gif").write_bytes(gif_data)
+        return Image(data=gif_data, format="gif")
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(
             f"Visualization failed: {exc}\n"
@@ -400,7 +430,91 @@ def generate_visualization(run_id: str) -> Image:
 
 
 # ---------------------------------------------------------------------------
-# Tool 5: check_installation
+# Tool 5: get_visualization_link
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def get_visualization_link(run_id: str, format: str = "gif") -> str:
+    """
+    Create a localhost link that displays a simulation visualization in the
+    user's browser.
+
+    Chat clients render inline PNG tool results but NOT animated GIFs — so
+    whenever the user wants to see the animation, use this tool instead of
+    generate_visualization() and hand them the link.
+
+    Renders the visualization from the solver output if it isn't on disk yet,
+    starts a small viewer server bound to 127.0.0.1 (this machine only), and
+    returns the URL. The link stays valid while the MCP server is running.
+
+    IMPORTANT: put the returned URL in your final, user-visible response as a
+    clickable markdown link. A link mentioned only inside thinking/reasoning
+    is invisible to the user.
+
+    Parameters
+    ----------
+    run_id : str
+        The run ID returned by run_simulation().
+    format : str
+        "gif" (default) — animated view cycling through all recorded
+        snapshots. "png" — still view of the final snapshot (note: for a
+        still, generate_visualization(format="png") embeds it directly in
+        chat, which is usually better).
+    """
+    from .runner import SIMULATIONS_DIR
+    run_dir = SIMULATIONS_DIR / run_id
+    if not run_dir.exists():
+        return (
+            f"ERROR: run directory '{run_id}' not found. "
+            "Check the run_id returned by run_simulation()."
+        )
+    if format not in ("gif", "png"):
+        return f"ERROR: format must be 'gif' or 'png', got '{format}'"
+
+    from . import visualizer      # lazy — keeps matplotlib out of startup path
+    from . import viewer_server
+
+    try:
+        target = run_dir / ("animation.gif" if format == "gif" else "final.png")
+        if not target.exists():
+            if format == "gif":
+                visualizer.generate_and_save_gif(str(run_dir))
+            else:
+                target.write_bytes(visualizer.generate_final_png(str(run_dir)))
+    except Exception as exc:  # noqa: BLE001
+        return (
+            f"ERROR: visualization failed: {exc}\n"
+            "DO NOT generate a chart yourself — report this error to the user."
+        )
+
+    url = viewer_server.view_url(run_id, format)
+    label = "wave animation" if format == "gif" else "final frame"
+    return (
+        f"Viewer link ready: {url}\n\n"
+        f"Present it to the user in your visible response as a markdown link, "
+        f"e.g. [Open the {label} in your browser]({url}). The page is served "
+        "from this machine (localhost only) and stays available while the "
+        "OceanWave3D MCP server is running."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tool: check_version
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def check_version() -> str:
+    """
+    Report which build of this MCP server is running.
+
+    Returns the version tag and message set in the source code. Use this to
+    verify that the client picked up the latest code after a restart.
+    """
+    return f"{_VERSION} - {_VERSION_MESSAGE}"
+
+
+# ---------------------------------------------------------------------------
+# Tool 6: check_installation
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
@@ -468,7 +582,7 @@ def check_installation() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tool 6: install_oceanwave3d
+# Tool 7: install_oceanwave3d
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
@@ -511,7 +625,7 @@ def install_oceanwave3d(paid_files_dir: Optional[str] = None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tool 7: installation_status
+# Tool 8: installation_status
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
