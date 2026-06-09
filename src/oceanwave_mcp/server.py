@@ -26,28 +26,35 @@ from .output_parser import snapshots_to_text_table, load_output
 
 _SERVER_INSTRUCTIONS = """\
 You are connected to OceanWave3D — a professional nonlinear wave simulation
-tool used in engineering and research. These rules apply for the entire session.
+tool used in engineering and research. These rules are ABSOLUTE and apply for
+the entire session.
 
-━━━ SIMULATION OUTPUT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-• run_simulation() returns a structured SIMULATION RECAP as markdown tables.
-  Display the recap tables exactly as received — do not rephrase, reorder,
-  summarise, or add commentary of your own.
-• Never round, invent, or restate values from the recap in your own words.
+━━━ SIMULATION OUTPUT — STRICT DISPLAY RULES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+run_simulation() returns a complete engineering recap with four fixed sections:
+  [1] Run Info  [2] Input Parameters  [3] Results  [4] Output Files
+
+MANDATORY rules — no exceptions:
+1. Display the ENTIRE recap VERBATIM. Do not skip, merge, or reorder sections.
+2. Do NOT add ANY text before the recap (no "Simulation complete!", no summary).
+3. Do NOT add ANY text after the recap (no "Note on the deviation", no physics
+   commentary, no "The wave shows...", no "This is consistent with...").
+4. Do NOT reformat the tables — keep each section as a separate table.
+5. The deviation % is a solver-computed result. Do not explain or qualify it.
+6. Every value is exact solver output — do not round, paraphrase, or annotate.
+
+The recap is a self-contained engineering document. Your job is to display it
+unchanged. Any text you add is wrong by definition.
 
 ━━━ VISUALIZATION ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 • To show a wave plot, call generate_visualization(run_id="...").
-• The image returned by generate_visualization IS the visualization — embed it
-  directly; do not generate a second chart below it.
-• Do NOT write your own matplotlib, Chart.js, or analytical wave code.
-  Claude-generated wave plots are incorrect because they guess the wave shape
-  instead of reading the solver output.
+• The image returned IS the visualization — embed it directly, add nothing.
+• Do NOT write matplotlib, Chart.js, or any analytical wave code.
+  Claude-generated plots are wrong — they guess the shape instead of reading
+  the solver output.
 
 ━━━ GENERAL ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-• This is an engineering tool. The same inputs always produce the same recap
-  and the same data — outputs must be reproducible.
-• Do not offer to "re-run with different parameters" unless the user asks.
-• Steepness, deviation %, and statistics are computed by the solver — do not
-  reinterpret or qualify them.
+• Same inputs → identical output every time. This is an engineering tool.
+• Do not offer to re-run unless the user asks.
 """
 
 mcp = FastMCP("OceanWave3D", instructions=_SERVER_INSTRUCTIONS)
@@ -193,7 +200,7 @@ def _format_recap(result: RunResult) -> str:
                  if p.get("wave_height_m") and p.get("wavelength_m") else None)
 
     lines = [
-        "## OceanWave3D — Simulation Recap",
+        f"## OceanWave3D — {scenario_name}",
         "",
         "### [1] Run Info",
         "| Field | Value |",
@@ -204,77 +211,73 @@ def _format_recap(result: RunResult) -> str:
         f"| Wall time | {result.elapsed_seconds:.1f} s |",
         "",
         "### [2] Input Parameters",
-        "| Parameter | Value | Notes |",
-        "|---|---|---|",
-        f"| Wave height | {p.get('wave_height_m', '?')} m | |",
-        f"| Water depth | {p.get('water_depth_m', '?')} m | |",
-        f"| Wave period | {p.get('wave_period_s', '?')} s | |",
-        f"| Wavelength | {p.get('wavelength_m', '?')} m | computed from dispersion relation |",
-        f"| Domain length | {p.get('domain_length_m', '?')} m | |",
-        f"| Grid points (x) | {p.get('grid_points_x', '?')} | |",
-        f"| Vertical layers | {p.get('vertical_layers', '?')} | |",
-        f"| Sim. duration | {p.get('num_periods', '?')} periods | "
-        f"{p.get('num_steps', '?')} steps × {p.get('timestep_s', '?')} s |",
-        f"| Equations | {'Fully nonlinear' if p.get('nonlinear') else 'Linear'} | |",
-        f"| Wave steepness H/λ | {steepness:.4f} | |" if steepness is not None else "",
-        "",
+        "| Parameter | Value |",
+        "|---|---|",
+        f"| Wave height | {p.get('wave_height_m', '?')} m |",
+        f"| Water depth | {p.get('water_depth_m', '?')} m |",
+        f"| Wave period | {p.get('wave_period_s', '?')} s |",
+        f"| Wavelength (λ) | {p.get('wavelength_m', '?')} m |",
+        f"| Domain length | {p.get('domain_length_m', '?')} m |",
+        f"| Grid points (x) | {p.get('grid_points_x', '?')} |",
+        f"| Vertical layers | {p.get('vertical_layers', '?')} |",
+        f"| Sim. duration | {p.get('num_periods', '?')} periods "
+        f"({p.get('num_steps', '?')} steps × {p.get('timestep_s', '?')} s) |",
+        f"| Equations | {'Fully nonlinear' if p.get('nonlinear') else 'Linear'} |",
     ]
+    if steepness is not None:
+        lines.append(f"| Wave steepness H/λ | {steepness:.4f} |")
+    lines.append("")
 
     if out:
         target_H = p.get("wave_height_m")
         dev_row = ""
         if target_H and target_H > 0:
             pct = 100.0 * abs(out.wave_height_measured - target_H) / target_H
-            dev_row = f"| Deviation from H | {pct:.1f} % | measured vs specified |"
+            dev_row = f"| Deviation from specified H | {pct:.1f}% |"
 
         lines += [
             "### [3] Results",
-            "| Metric | Value | Notes |",
-            "|---|---|---|",
-            f"| Snapshots recorded | {out.num_snapshots} | |",
-            f"| Grid points (x) | {out.num_x_points} | |",
-            f"| Max surface elev. | {out.max_elevation:+.5f} m | |",
-            f"| Min surface elev. | {out.min_elevation:+.5f} m | |",
-            f"| Measured H (steady) | {out.wave_height_measured:.5f} m | max−min, last 50 % of run |",
-            f"| RMS elevation | {out.rms_elevation:.5f} m | |",
+            "| Metric | Value |",
+            "|---|---|",
+            f"| Max surface elevation | {out.max_elevation:+.4f} m |",
+            f"| Min surface elevation | {out.min_elevation:+.4f} m |",
+            f"| Measured H (steady, last 50%) | {out.wave_height_measured:.4f} m |",
+            f"| RMS elevation | {out.rms_elevation:.5f} m |",
         ]
         if dev_row:
             lines.append(dev_row)
         lines.append("")
 
-        # ── [4] Output files ──────────────────────────────────────────
-        first = run_dir / out.files_found[0] if out.files_found else "—"
-        last  = run_dir / out.files_found[-1] if out.files_found else "—"
+        first = run_dir / out.files_found[0] if out.files_found else None
+        last  = run_dir / out.files_found[-1] if out.files_found else None
         lines += [
             "### [4] Output Files",
-            f"**Directory:** `{run_dir}/`",
+            f"**Directory:** `{run_dir}`",
             "",
-            "| File | Full path |",
+            "| File | Path |",
             "|---|---|",
             f"| params.json | `{run_dir / 'params.json'}` |",
             f"| input.inp | `{run_dir / 'input.inp'}` |",
-            f"| {out.files_found[0]} (t=0) | `{first}` |" if out.files_found else "",
-            f"| … ({len(out.files_found)} snapshot files) | … |" if len(out.files_found) > 2 else "",
-            f"| {out.files_found[-1]} (final) | `{last}` |" if len(out.files_found) > 1 else "",
-            "",
+        ]
+        if out.files_found:
+            lines.append(f"| {out.files_found[0]} | `{run_dir / out.files_found[0]}` |")
+            if len(out.files_found) > 2:
+                lines.append(f"| … ({len(out.files_found)} snapshot files total) | … |")
+            if len(out.files_found) > 1:
+                lines.append(f"| {out.files_found[-1]} (final) | `{run_dir / out.files_found[-1]}` |")
+        lines.append("")
+
+        lines += [
             "<details>",
             "<summary>All snapshot files</summary>",
             "",
-            "| File | Full path |",
+            "| File | Path |",
             "|---|---|",
         ]
         for fname in out.files_found:
             lines.append(f"| {fname} | `{run_dir / fname}` |")
-        lines += [
-            "",
-            "</details>",
-            "",
-        ]
+        lines += ["", "</details>", ""]
 
-    lines += [
-        "---",
-        f'Next step: `get_detailed_results(run_id="{result.run_id}")`',
-    ]
     return "\n".join(lines)
 
 
