@@ -2,24 +2,55 @@
 OceanWave3D MCP Server
 
 Exposes tools to the LLM:
-  1. list_scenarios       — what simulations can I run?
-  2. run_simulation       — run a simulation and get statistics back
-  3. get_detailed_results — re-read output from a previous run
-  4. check_installation   — is OceanWave3D built and ready?
-  5. install_oceanwave3d  — build OceanWave3D from the licensed source files
-  6. installation_status  — progress of an in-flight build
+  1. list_scenarios        — what simulations can I run?
+  2. run_simulation        — run a simulation and get statistics back
+  3. get_detailed_results  — re-read output from a previous run
+  4. generate_visualization — render GIF/PNG from solver output (not Claude-generated)
+  5. check_installation    — is OceanWave3D built and ready?
+  6. install_oceanwave3d   — build OceanWave3D from the licensed source files
+  7. installation_status   — progress of an in-flight build
 """
 import json
+from pathlib import Path
 from typing import Optional
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Image
 
 from . import installer
 from .inp_builder import SCENARIOS, build_inp
 from .runner import run_simulation as _run, RunResult, BINARY_PATH
 from .output_parser import snapshots_to_text_table, load_output
+# visualizer is imported lazily inside generate_visualization() to avoid
+# loading matplotlib/Pillow at server startup (would exceed Claude Desktop's
+# connection timeout)
 
-mcp = FastMCP("OceanWave3D")
+_SERVER_INSTRUCTIONS = """\
+You are connected to OceanWave3D — a professional nonlinear wave simulation
+tool used in engineering and research. These rules apply for the entire session.
+
+━━━ SIMULATION OUTPUT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+• run_simulation() returns a structured SIMULATION RECAP as markdown tables.
+  Display the recap tables exactly as received — do not rephrase, reorder,
+  summarise, or add commentary of your own.
+• Never round, invent, or restate values from the recap in your own words.
+
+━━━ VISUALIZATION ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+• To show a wave plot, call generate_visualization(run_id="...").
+• The image returned by generate_visualization IS the visualization — embed it
+  directly; do not generate a second chart below it.
+• Do NOT write your own matplotlib, Chart.js, or analytical wave code.
+  Claude-generated wave plots are incorrect because they guess the wave shape
+  instead of reading the solver output.
+
+━━━ GENERAL ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+• This is an engineering tool. The same inputs always produce the same recap
+  and the same data — outputs must be reproducible.
+• Do not offer to "re-run with different parameters" unless the user asks.
+• Steepness, deviation %, and statistics are computed by the solver — do not
+  reinterpret or qualify them.
+"""
+
+mcp = FastMCP("OceanWave3D", instructions=_SERVER_INSTRUCTIONS)
 
 
 # ---------------------------------------------------------------------------
@@ -61,7 +92,7 @@ def run_simulation(
     num_periods: Optional[float] = None,
     nonlinear: Optional[bool] = None,
     label: str = "",
-) -> str:
+):
     """
     Run an OceanWave3D simulation and return a summary of the results.
 
@@ -93,8 +124,8 @@ def run_simulation(
 
     Returns
     -------
-    A text summary with run ID, wall time, and wave statistics.
-    The run ID can be passed to get_detailed_results() for the full dataset.
+    A structured engineering recap table. IMPORTANT: display it exactly as
+    returned. Do not rewrite, reformat, summarise, or add commentary of your own.
     """
     # If the solver isn't built yet, suggest installing it instead of failing cryptically.
     if not BINARY_PATH.exists():
@@ -119,22 +150,132 @@ def run_simulation(
     }.items() if v is not None}
 
     try:
-        inp = build_inp(scenario, **kwargs)
+        inp, params = build_inp(scenario, **kwargs)
     except (ValueError, TypeError) as exc:
         return f"ERROR building input file: {exc}"
 
     try:
-        result: RunResult = _run(inp, label=label or scenario)
+        result: RunResult = _run(inp, label=label or scenario, params=params)
     except RuntimeError as exc:
         return f"ERROR: {exc}"
 
-    summary = result.summary()
-
     if not result.success:
         tail = (result.stdout + result.stderr)[-800:]
-        return f"{summary}\n\nLast console output:\n{tail}"
+        return f"{result.summary()}\n\nLast console output:\n{tail}"
 
-    return f"{summary}\n\nTo inspect the full time-series data call:\n  get_detailed_results(run_id=\"{result.run_id}\")"
+    # Save GIF to disk (background bonus — never blocks the response)
+    try:
+        from . import visualizer
+        visualizer.generate_and_save_gif(result.run_dir)
+    except Exception:  # noqa: BLE001
+        pass
+
+    return _format_recap(result)
+
+
+# ---------------------------------------------------------------------------
+# Recap + wave-data helpers
+# ---------------------------------------------------------------------------
+
+def _format_recap(result: RunResult) -> str:
+    """Build a structured, deterministic recap for a completed simulation run."""
+    p = result.params
+    out = result.output
+    run_dir = Path(result.run_dir)
+
+    scenario_labels = {
+        "stream_function_wave":    "Stream Function Wave (nonlinear regular wave)",
+        "linear_regular_wave":     "Linear Regular Wave",
+        "nonlinear_standing_wave": "Nonlinear Standing Wave",
+    }
+    scenario_name = scenario_labels.get(p.get("scenario", ""), p.get("scenario", "unknown"))
+    steepness = (p["wave_height_m"] / p["wavelength_m"]
+                 if p.get("wave_height_m") and p.get("wavelength_m") else None)
+
+    lines = [
+        "## OceanWave3D — Simulation Recap",
+        "",
+        "### [1] Run Info",
+        "| Field | Value |",
+        "|---|---|",
+        f"| Scenario | {scenario_name} |",
+        f"| Run ID | `{result.run_id}` |",
+        f"| Status | SUCCESS |",
+        f"| Wall time | {result.elapsed_seconds:.1f} s |",
+        "",
+        "### [2] Input Parameters",
+        "| Parameter | Value | Notes |",
+        "|---|---|---|",
+        f"| Wave height | {p.get('wave_height_m', '?')} m | |",
+        f"| Water depth | {p.get('water_depth_m', '?')} m | |",
+        f"| Wave period | {p.get('wave_period_s', '?')} s | |",
+        f"| Wavelength | {p.get('wavelength_m', '?')} m | computed from dispersion relation |",
+        f"| Domain length | {p.get('domain_length_m', '?')} m | |",
+        f"| Grid points (x) | {p.get('grid_points_x', '?')} | |",
+        f"| Vertical layers | {p.get('vertical_layers', '?')} | |",
+        f"| Sim. duration | {p.get('num_periods', '?')} periods | "
+        f"{p.get('num_steps', '?')} steps × {p.get('timestep_s', '?')} s |",
+        f"| Equations | {'Fully nonlinear' if p.get('nonlinear') else 'Linear'} | |",
+        f"| Wave steepness H/λ | {steepness:.4f} | |" if steepness is not None else "",
+        "",
+    ]
+
+    if out:
+        target_H = p.get("wave_height_m")
+        dev_row = ""
+        if target_H and target_H > 0:
+            pct = 100.0 * abs(out.wave_height_measured - target_H) / target_H
+            dev_row = f"| Deviation from H | {pct:.1f} % | measured vs specified |"
+
+        lines += [
+            "### [3] Results",
+            "| Metric | Value | Notes |",
+            "|---|---|---|",
+            f"| Snapshots recorded | {out.num_snapshots} | |",
+            f"| Grid points (x) | {out.num_x_points} | |",
+            f"| Max surface elev. | {out.max_elevation:+.5f} m | |",
+            f"| Min surface elev. | {out.min_elevation:+.5f} m | |",
+            f"| Measured H (steady) | {out.wave_height_measured:.5f} m | max−min, last 50 % of run |",
+            f"| RMS elevation | {out.rms_elevation:.5f} m | |",
+        ]
+        if dev_row:
+            lines.append(dev_row)
+        lines.append("")
+
+        # ── [4] Output files ──────────────────────────────────────────
+        first = run_dir / out.files_found[0] if out.files_found else "—"
+        last  = run_dir / out.files_found[-1] if out.files_found else "—"
+        lines += [
+            "### [4] Output Files",
+            f"**Directory:** `{run_dir}/`",
+            "",
+            "| File | Full path |",
+            "|---|---|",
+            f"| params.json | `{run_dir / 'params.json'}` |",
+            f"| input.inp | `{run_dir / 'input.inp'}` |",
+            f"| {out.files_found[0]} (t=0) | `{first}` |" if out.files_found else "",
+            f"| … ({len(out.files_found)} snapshot files) | … |" if len(out.files_found) > 2 else "",
+            f"| {out.files_found[-1]} (final) | `{last}` |" if len(out.files_found) > 1 else "",
+            "",
+            "<details>",
+            "<summary>All snapshot files</summary>",
+            "",
+            "| File | Full path |",
+            "|---|---|",
+        ]
+        for fname in out.files_found:
+            lines.append(f"| {fname} | `{run_dir / fname}` |")
+        lines += [
+            "",
+            "</details>",
+            "",
+        ]
+
+    lines += [
+        "---",
+        f'Next step: `get_detailed_results(run_id="{result.run_id}")`',
+    ]
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +315,31 @@ def get_detailed_results(run_id: str, max_snapshots: int = 5) -> str:
     if not out.snapshots:
         return f"No fort.1XX output files found in {run_dir}. The simulation may not have produced output."
 
-    lines = [
+    lines = []
+
+    params_file = run_dir / "params.json"
+    if params_file.exists():
+        try:
+            p = json.loads(params_file.read_text())
+            lines += [
+                "--- Simulation parameters ---",
+                f"  Scenario        : {p.get('scenario', '?')}",
+                f"  Wave height     : {p.get('wave_height_m', '?')} m",
+                f"  Water depth     : {p.get('water_depth_m', '?')} m",
+                f"  Wave period     : {p.get('wave_period_s', '?')} s",
+                f"  Wavelength      : {p.get('wavelength_m', '?')} m",
+                f"  Domain length   : {p.get('domain_length_m', '?')} m",
+                f"  Grid points (x) : {p.get('grid_points_x', '?')}",
+                f"  Vertical layers : {p.get('vertical_layers', '?')}",
+                f"  Num periods     : {p.get('num_periods', '?')}",
+                f"  Equations       : {'Fully nonlinear' if p.get('nonlinear') else 'Linear'}",
+                "",
+            ]
+        except Exception:  # noqa: BLE001
+            pass
+
+    lines += [
+        "--- Output statistics ---",
         out.summary(),
         "",
         "--- Free-surface elevation table (selected snapshots) ---",
@@ -184,7 +349,55 @@ def get_detailed_results(run_id: str, max_snapshots: int = 5) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tool 4: check_installation
+# Tool 4: generate_visualization
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def generate_visualization(run_id: str) -> Image:
+    """
+    Generate a visualization from a completed OceanWave3D simulation run.
+
+    Reads the fort.1XX solver output files directly and renders them with
+    matplotlib. The image is derived entirely from solver data — no guessing,
+    no interpolation. Same run always produces the same image.
+
+    Returns a PNG panel showing evenly-spaced time snapshots embedded directly
+    in the chat. Also saves an animated GIF to the run directory for external
+    viewing. Do not generate a separate chart — this IS the visualization.
+
+    Parameters
+    ----------
+    run_id : str
+        The run ID returned by run_simulation().
+    """
+    from .runner import SIMULATIONS_DIR
+    run_dir = SIMULATIONS_DIR / run_id
+    if not run_dir.exists():
+        raise ValueError(
+            f"Run directory '{run_id}' not found. "
+            "Check the run_id returned by run_simulation()."
+        )
+
+    from . import visualizer  # lazy — keeps matplotlib out of startup path
+
+    try:
+        # Always return PNG — Claude Desktop only renders image/png inline.
+        # GIF is saved to disk for external viewing.
+        png_data = visualizer.generate_panel_png(str(run_dir))
+        try:
+            gif_path = visualizer.generate_and_save_gif(str(run_dir))
+        except Exception:  # noqa: BLE001
+            gif_path = None  # GIF is bonus; don't let it fail the whole call
+        return Image(data=png_data, format="png")
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            f"Visualization failed: {exc}\n"
+            "DO NOT generate a chart yourself — report this error to the user instead."
+        ) from exc
+
+
+# ---------------------------------------------------------------------------
+# Tool 5: check_installation
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
@@ -252,7 +465,7 @@ def check_installation() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tool 5: install_oceanwave3d
+# Tool 6: install_oceanwave3d
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
@@ -295,7 +508,7 @@ def install_oceanwave3d(paid_files_dir: Optional[str] = None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tool 6: installation_status
+# Tool 7: installation_status
 # ---------------------------------------------------------------------------
 
 @mcp.tool()

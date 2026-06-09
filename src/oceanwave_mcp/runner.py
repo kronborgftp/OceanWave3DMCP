@@ -8,10 +8,10 @@ Each call to run_simulation():
   4. Captures stdout/stderr and parses fort.1XX output files.
   5. Returns a RunResult with stats and raw console output.
 """
+import json
 import os
 import subprocess
 import sys
-import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -61,6 +61,7 @@ class RunResult:
     stderr: str
     output: SimulationOutput | None = None
     error_message: str = ""
+    params: dict = field(default_factory=dict)
 
     def summary(self) -> str:
         lines = [
@@ -76,7 +77,7 @@ class RunResult:
         return "\n".join(lines)
 
 
-def run_simulation(inp_content: str, label: str = "") -> RunResult:
+def run_simulation(inp_content: str, label: str = "", params: dict | None = None) -> RunResult:
     """
     Write inp_content to a fresh run directory and execute OceanWave3D.
 
@@ -108,6 +109,8 @@ def run_simulation(inp_content: str, label: str = "") -> RunResult:
 
     inp_path = run_dir / INP_FILENAME
     inp_path.write_text(inp_content)
+    if params:
+        (run_dir / "params.json").write_text(json.dumps(params, indent=2))
 
     t0 = time.monotonic()
     try:
@@ -166,6 +169,7 @@ def run_simulation(inp_content: str, label: str = "") -> RunResult:
         stderr=stderr,
         output=sim_output,
         error_message=error_msg,
+        params=params or {},
     )
 
 

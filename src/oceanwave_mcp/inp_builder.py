@@ -115,8 +115,8 @@ def build_stream_function_wave(
     vertical_layers: int = 9,
     num_periods: float = 15.0,
     nonlinear: bool = True,
-) -> str:
-    """Return a complete .inp file string for a stream-function wave simulation."""
+) -> tuple[str, dict]:
+    """Return (inp_content, resolved_params) for a stream-function wave simulation."""
     H, h, T = wave_height, water_depth, wave_period
     L = _wavelength(T, h)
     Lx = domain_length if domain_length else max(8.0 * L, 4.0)
@@ -129,10 +129,25 @@ def build_stream_function_wave(
     nonlinear_flag = 1 if nonlinear else 0
     z = _zone_layout(Lx)
 
+    params = {
+        "scenario": "stream_function_wave",
+        "wave_height_m": H,
+        "water_depth_m": h,
+        "wave_period_s": T,
+        "wavelength_m": round(L, 4),
+        "domain_length_m": round(Lx, 4),
+        "grid_points_x": Nx,
+        "vertical_layers": Nz,
+        "num_periods": num_periods,
+        "timestep_s": round(dt, 6),
+        "num_steps": Nsteps,
+        "nonlinear": nonlinear,
+    }
+
     # Each line needs a trailing '<-' so gfortran's list-directed reader
     # treats it as an end-of-record marker and does not consume tokens
     # from the next line. Without this the file parsing silently misaligns.
-    return "\n".join([
+    inp = "\n".join([
         f"Stream function wave  H={H:.3f}m  h={h:.3f}m  T={T:.3f}s",
         f"0  1  1000. <-",
         f"{Lx:.3f} 1. {h:.3f} {Nx} 1 {Nz} 0 0 1 1 1 1 <-",
@@ -153,6 +168,7 @@ def build_stream_function_wave(
         f"0 2.0 2 0 0 1 0 <-",
         f"0 <-",
     ]) + "\n"
+    return inp, params
 
 
 def build_linear_regular_wave(
@@ -163,8 +179,8 @@ def build_linear_regular_wave(
     grid_points_x: int = 137,
     vertical_layers: int = 9,
     num_periods: float = 10.0,
-) -> str:
-    """Return a complete .inp file string for a linear regular wave simulation."""
+) -> tuple[str, dict]:
+    """Return (inp_content, resolved_params) for a linear regular wave simulation."""
     H, h, T = wave_height, water_depth, wave_period
     L = _wavelength(T, h)
     Lx = domain_length if domain_length else max(8.0 * L, 4.0)
@@ -176,8 +192,23 @@ def build_linear_regular_wave(
     stride = max(2, Nsteps // 100)
     z = _zone_layout(Lx)
 
+    params = {
+        "scenario": "linear_regular_wave",
+        "wave_height_m": H,
+        "water_depth_m": h,
+        "wave_period_s": T,
+        "wavelength_m": round(L, 4),
+        "domain_length_m": round(Lx, 4),
+        "grid_points_x": Nx,
+        "vertical_layers": Nz,
+        "num_periods": num_periods,
+        "timestep_s": round(dt, 6),
+        "num_steps": Nsteps,
+        "nonlinear": False,
+    }
+
     # Linear wave uses IncWaveType=2 (linear irregular/regular), ispec=-1 (monochromatic)
-    return "\n".join([
+    inp = "\n".join([
         f"Linear regular wave  H={H:.4f}m  h={h:.3f}m  T={T:.3f}s",
         f"0  2 <-",
         f"{Lx:.3f} 1. {h:.3f} {Nx} 1 {Nz} 0 0 1 1 1 1 <-",
@@ -198,6 +229,7 @@ def build_linear_regular_wave(
         f"0 <-",
         f"-1  {T:.4f} {H:.4f} {h:.4f} 50. -1 -34 0. 0. run.el 0.0 <-",
     ]) + "\n"
+    return inp, params
 
 
 def build_nonlinear_standing_wave(
@@ -208,8 +240,8 @@ def build_nonlinear_standing_wave(
     vertical_layers: int = 9,
     num_periods: float = 10.0,
     nonlinear: bool = True,
-) -> str:
-    """Return a complete .inp file string for a nonlinear standing wave simulation."""
+) -> tuple[str, dict]:
+    """Return (inp_content, resolved_params) for a nonlinear standing wave simulation."""
     H, h, T = wave_height, water_depth, wave_period
     L = _wavelength(T, h)
     Lx = L / 2.0  # domain = half wavelength for standing wave
@@ -221,7 +253,22 @@ def build_nonlinear_standing_wave(
     stride = max(2, Nsteps // 100)
     nonlinear_flag = 1 if nonlinear else 0
 
-    return "\n".join([
+    params = {
+        "scenario": "nonlinear_standing_wave",
+        "wave_height_m": H,
+        "water_depth_m": h,
+        "wave_period_s": T,
+        "wavelength_m": round(L, 4),
+        "domain_length_m": round(Lx, 4),
+        "grid_points_x": Nx,
+        "vertical_layers": Nz,
+        "num_periods": num_periods,
+        "timestep_s": round(dt, 6),
+        "num_steps": Nsteps,
+        "nonlinear": nonlinear,
+    }
+
+    inp = "\n".join([
         f"Nonlinear standing wave  H={H:.3f}m  h={h:.3f}m  T={T:.3f}s",
         f"1  0 <-",
         f"{Lx:.4f} 1. {h:.3f} {Nx} 1 {Nz} 0 0 1 1 1 1 <-",
@@ -239,14 +286,15 @@ def build_nonlinear_standing_wave(
         f"0 2.0 2 0 0 1 0 <-",
         f"0 <-",
     ]) + "\n"
+    return inp, params
 
 
 # ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 
-def build_inp(scenario: str, **kwargs) -> str:
-    """Build a .inp file for the given scenario with keyword overrides."""
+def build_inp(scenario: str, **kwargs) -> tuple[str, dict]:
+    """Build a .inp file for the given scenario. Returns (inp_content, resolved_params)."""
     if scenario == "stream_function_wave":
         return build_stream_function_wave(**kwargs)
     elif scenario == "linear_regular_wave":
