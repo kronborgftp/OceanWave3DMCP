@@ -6,8 +6,9 @@ Exposes tools to the LLM:
   2. run_simulation        — run a simulation and get statistics back
   3. get_detailed_results  — re-read output from a previous run
   4. generate_visualization — render GIF/PNG from solver output (not Claude-generated)
-  5. get_visualization_link — localhost browser link (use for animations: chat
-                              clients render inline PNG but not animated GIF)
+  5. get_visualization_link — localhost link to the interactive viewer
+                              (animated, annotated, side-by-side comparison;
+                              chat clients render inline PNG but not GIFs)
   6. check_installation    — is OceanWave3D built and ready?
   7. install_oceanwave3d   — build OceanWave3D from the licensed source files
   8. installation_status   — progress of an in-flight build
@@ -60,9 +61,14 @@ unchanged. Any text you add is wrong by definition.
 ━━━ VISUALIZATION ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 • Still image in chat: call generate_visualization(run_id="...", format="png").
   The returned PNG IS the visualization — embed it directly, add nothing.
-• Animation: chat clients can NOT render animated GIFs inline. Call
+• Anything richer (animation, annotated ocean cross-section, x–t heatmap,
+  3D surface, comparing runs side by side): call
   get_visualization_link(run_id="...") and give the user the returned
-  http://127.0.0.1:... URL as a clickable markdown link.
+  http://127.0.0.1:... URL as a clickable markdown link. The page is an
+  interactive viewer with toggles — no need to render variants yourself.
+• To compare runs visually, pass compare_with="other_run_id" to
+  get_visualization_link — the viewer shows the runs side by side with
+  linked playback, toggles, and scales.
 • The image or link MUST appear in your final, user-visible response.
   NEVER show it only inside a thinking/reasoning block — the user cannot
   see content there. If you called the tool while reasoning, repeat the
@@ -80,8 +86,9 @@ mcp = FastMCP("OceanWave3D", instructions=_SERVER_INSTRUCTIONS)
 
 # Bump these whenever you change the server, then verify with check_version()
 # that Claude Desktop picked up the new code.
-_VERSION = "0.3"
-_VERSION_MESSAGE = "Added get_visualization_link: open animations in the browser"
+_VERSION = "0.4"
+_VERSION_MESSAGE = ("Interactive viewer: annotated cross-section, heatmap, "
+                    "3D surface, side-by-side run comparison")
 
 
 # ---------------------------------------------------------------------------
@@ -434,17 +441,29 @@ def generate_visualization(run_id: str, format: str = "gif") -> Image:
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def get_visualization_link(run_id: str, format: str = "gif") -> str:
+def get_visualization_link(run_id: str, format: str = "gif",
+                           compare_with: Optional[str] = None) -> str:
     """
-    Create a localhost link that displays a simulation visualization in the
-    user's browser.
+    Create a localhost link that opens a simulation in the interactive
+    results viewer in the user's browser.
+
+    The viewer renders the solver output client-side and offers (all as
+    user-controlled toggles — do not render variants yourself):
+      - animated ocean cross-section: solid water fill, seabed, shaded wave
+        generation/absorption zones, scale bars, optional 1.8 m human
+        silhouette, axes in metres and a "t = … s" timestamp
+      - x–t heatmap with a diverging blue–white–red colormap centred on the
+        still-water level, colorbar labelled in metres
+      - perspective 3D surface view
+      - plain-language titles generated from the input parameters
+      - side-by-side comparison of runs from this session with linked
+        playback, toggles, and scales
 
     Chat clients render inline PNG tool results but NOT animated GIFs — so
-    whenever the user wants to see the animation, use this tool instead of
-    generate_visualization() and hand them the link.
+    whenever the user wants the animation, a comparison, or any richer view,
+    use this tool instead of generate_visualization() and hand them the link.
 
-    Renders the visualization from the solver output if it isn't on disk yet,
-    starts a small viewer server bound to 127.0.0.1 (this machine only), and
+    Starts a small viewer server bound to 127.0.0.1 (this machine only) and
     returns the URL. The link stays valid while the MCP server is running.
 
     IMPORTANT: put the returned URL in your final, user-visible response as a
@@ -456,10 +475,14 @@ def get_visualization_link(run_id: str, format: str = "gif") -> str:
     run_id : str
         The run ID returned by run_simulation().
     format : str
-        "gif" (default) — animated view cycling through all recorded
-        snapshots. "png" — still view of the final snapshot (note: for a
-        still, generate_visualization(format="png") embeds it directly in
-        chat, which is usually better).
+        "gif" (default) — the viewer opens with the animation playing.
+        "png" — the viewer opens paused on the final snapshot (note: for a
+        still in the chat itself, generate_visualization(format="png")
+        embeds it directly, which is usually better).
+    compare_with : str, optional
+        Comma-separated run ID(s) to open side by side with the primary run,
+        with linked playback, toggles, and scales. Use when the user wants to
+        compare simulations visually.
     """
     from .runner import SIMULATIONS_DIR
     run_dir = SIMULATIONS_DIR / run_id
@@ -471,9 +494,20 @@ def get_visualization_link(run_id: str, format: str = "gif") -> str:
     if format not in ("gif", "png"):
         return f"ERROR: format must be 'gif' or 'png', got '{format}'"
 
+    compare_ids = [c.strip() for c in (compare_with or "").split(",") if c.strip()]
+    missing = [c for c in compare_ids if not (SIMULATIONS_DIR / c).exists()]
+    if missing:
+        return (
+            f"ERROR: compare_with run(s) not found: {', '.join(missing)}. "
+            "Check the run IDs returned by run_simulation()."
+        )
+
     from . import visualizer      # lazy — keeps matplotlib out of startup path
     from . import viewer_server
 
+    # Best effort: keep a GIF/PNG on disk so the viewer's download links work.
+    # The interactive viewer reads solver data directly, so a render failure
+    # must not block the link.
     try:
         target = run_dir / ("animation.gif" if format == "gif" else "final.png")
         if not target.exists():
@@ -481,20 +515,21 @@ def get_visualization_link(run_id: str, format: str = "gif") -> str:
                 visualizer.generate_and_save_gif(str(run_dir))
             else:
                 target.write_bytes(visualizer.generate_final_png(str(run_dir)))
-    except Exception as exc:  # noqa: BLE001
-        return (
-            f"ERROR: visualization failed: {exc}\n"
-            "DO NOT generate a chart yourself — report this error to the user."
-        )
+    except Exception:  # noqa: BLE001
+        pass
 
-    url = viewer_server.view_url(run_id, format)
-    label = "wave animation" if format == "gif" else "final frame"
+    url = viewer_server.view_url(run_id, format, compare=compare_ids or None)
+    label = ("run comparison" if compare_ids
+             else "wave animation" if format == "gif" else "final frame")
     return (
-        f"Viewer link ready: {url}\n\n"
+        f"Interactive viewer link ready: {url}\n\n"
         f"Present it to the user in your visible response as a markdown link, "
-        f"e.g. [Open the {label} in your browser]({url}). The page is served "
-        "from this machine (localhost only) and stays available while the "
-        "OceanWave3D MCP server is running."
+        f"e.g. [Open the {label} in your browser]({url}). The page lets the "
+        "user toggle annotations (water fill, seabed, zones, scale bars), "
+        "switch between cross-section, heatmap, and 3D surface views, and "
+        "compare runs from this session side by side. It is served from this "
+        "machine (localhost only) and stays available while the OceanWave3D "
+        "MCP server is running."
     )
 
 

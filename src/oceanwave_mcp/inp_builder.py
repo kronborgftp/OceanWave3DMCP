@@ -106,6 +106,20 @@ def _zone_layout(Lx: float) -> _ZoneLayout:
 _MIN_NZ = 9  # stencil gamma=3 → needs 2*3+1=7; use 9 as safe minimum
 
 
+def _zone_params(z: _ZoneLayout) -> list[dict]:
+    """User-facing zone annotations stored in params.json for the viewer.
+
+    The generation and ramp relaxation zones are merged into one region —
+    both exist to create the wave; the distinction is numerical, not physical.
+    """
+    return [
+        {"x0": 0.0, "x1": round(z.x_ramp_end, 4),
+         "kind": "generation", "label": "waves created here"},
+        {"x0": round(z.x_damp_start, 4), "x1": round(z.Lx, 4),
+         "kind": "absorption", "label": "waves absorbed here"},
+    ]
+
+
 def build_stream_function_wave(
     wave_height: float = 0.08,
     water_depth: float = 1.0,
@@ -142,6 +156,7 @@ def build_stream_function_wave(
         "timestep_s": round(dt, 6),
         "num_steps": Nsteps,
         "nonlinear": nonlinear,
+        "zones": _zone_params(z),
     }
 
     # Each line needs a trailing '<-' so gfortran's list-directed reader
@@ -205,6 +220,7 @@ def build_linear_regular_wave(
         "timestep_s": round(dt, 6),
         "num_steps": Nsteps,
         "nonlinear": False,
+        "zones": _zone_params(z),
     }
 
     # Linear wave uses IncWaveType=2 (linear irregular/regular), ispec=-1 (monochromatic)
@@ -266,6 +282,7 @@ def build_nonlinear_standing_wave(
         "timestep_s": round(dt, 6),
         "num_steps": Nsteps,
         "nonlinear": nonlinear,
+        "zones": [],  # closed domain — no generation/absorption zones
     }
 
     inp = "\n".join([

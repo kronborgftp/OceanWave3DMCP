@@ -16,6 +16,8 @@ A user can type a plain-English request like:
 
 The MCP server translates this into a complete OceanWave3D parameter file, executes the Fortran simulation binary, parses the output, and returns wave statistics and a free-surface elevation time series — all without the user needing to know anything about the `.inp` file format or Fortran.
 
+Results can then be explored in an **interactive localhost viewer**: an animated, annotated ocean cross-section, an x–t heatmap, a perspective 3D surface, and side-by-side comparison of runs — see [Interactive results viewer](#interactive-results-viewer).
+
 ### Example result
 
 The prompt above produces:
@@ -50,6 +52,15 @@ User (Claude Desktop chat)
                                               │
                                               ▼
                                     fort.100 … fort.NNN  (wave snapshots)
+                                              │
+                                ┌─────────────┴─────────────┐
+                                ▼                           ▼
+                        visualizer.py                viewer_server.py
+                        (GIF/PNG via               (localhost JSON API +
+                         matplotlib)               interactive viewer)
+                                                            │
+                                                            ▼
+                                              User's browser (127.0.0.1)
 ```
 
 ### Repository layout
@@ -57,11 +68,16 @@ User (Claude Desktop chat)
 ```
 OceanWaveMCP/
 ├── src/oceanwave_mcp/
-│   ├── server.py          # FastMCP server — exposes 3 tools to the LLM
+│   ├── server.py          # FastMCP server — exposes the MCP tools to the LLM
 │   ├── inp_builder.py     # Translates human parameters → .inp file
 │   ├── runner.py          # Runs the binary in an isolated directory
 │   ├── output_parser.py   # Parses fort.1XX ASCII output → wave statistics
+│   ├── visualizer.py      # Deterministic GIF/PNG rendering (matplotlib)
+│   ├── viewer_server.py   # Localhost server: data API + interactive viewer
+│   ├── static/            # viewer.html / viewer.js — the interactive viewer app
 │   └── installer.py       # Builds OceanWave3D + deps from licensed source tarballs
+├── skills/                # Claude skill governing visualization behaviour
+├── tests/                 # Manual smoke tests (endpoints, browser screenshots)
 ├── OceanWave3D-Fortran90/ # Git submodule — prof's Fortran source
 ├── bin/OceanWave3D        # Compiled binary (macOS/Linux, gitignored)
 ├── bin/OceanWave3D.exe    # Compiled binary (Windows, gitignored)
@@ -73,7 +89,7 @@ OceanWaveMCP/
 
 ## MCP Tools
 
-The server exposes three tools to Claude:
+The server exposes these tools to Claude:
 
 ### `list_scenarios()`
 Returns all available simulation types with parameter descriptions.
@@ -113,6 +129,14 @@ Re-reads a completed run and returns a table of surface elevation E and velocity
 
 ---
 
+### `generate_visualization(run_id, format="gif")`
+Renders a deterministic visualization from the fort.1XX solver output with matplotlib — `"png"` returns a still of the final snapshot (renders inline in chat), `"gif"` an animation cycling through all recorded snapshots. Same `run_id` always produces the same image; nothing is interpolated or invented.
+
+### `get_visualization_link(run_id, format="gif", compare_with=None)`
+Returns a `http://127.0.0.1:...` link that opens the run in the [interactive results viewer](#interactive-results-viewer) in the user's browser. Pass `compare_with="other_run_id"` (comma-separated for several) to open runs side by side with linked playback, toggles, and scales. Chat clients cannot play animated GIFs inline, so this is the tool to use for animations and anything richer than a single still.
+
+---
+
 ### `check_installation()`
 Reports whether the OceanWave3D solver is built and ready, and — if not — exactly what is missing (compiler toolchain, licensed source files, submodule).
 
@@ -121,6 +145,39 @@ Builds OceanWave3D from the licensed source files (LAPACK/BLAS, SPARSKIT2, Harwe
 
 ### `installation_status()`
 Reports build progress: `running`, `succeeded`, `failed`, or `none`, plus the tail of the build log for diagnosing failures.
+
+---
+
+## Interactive results viewer
+
+`get_visualization_link` starts a small web server bound to **127.0.0.1 only** (never reachable from the network) and returns a link to an interactive viewer. The viewer is a dependency-free HTML/JS app that fetches the parsed solver output as JSON and renders it client-side — every pixel is derived from the fort.1XX snapshot data and `params.json`, so toggling options re-renders instantly without re-running matplotlib.
+
+### Views
+
+| View | What it shows |
+|---|---|
+| **Cross-section** (default) | Animated η(x) profile drawn as an ocean cross-section: solid blue water below the surface, sand below the seabed, sky above |
+| **Heatmap (x–t)** | The full space-time history at once, with a diverging blue–white–red colormap centred on still-water level (red = above, blue = below) and a colorbar labelled in metres. Click/drag to scrub time |
+| **3D surface** | Perspective-rendered, light-shaded water surface (the 2D profile extruded along y — long-crested), animated over time |
+
+### Annotation toggles
+
+All of these are user-controlled checkboxes on the page:
+
+- **Fill water / Seabed** — ocean-style rendering instead of a bare line graph; the bottom profile explains shoaling-type behaviour
+- **Zones** — the wave **generation** and **absorption** zones are shaded and labelled *"waves created here"* / *"waves absorbed here"*, so waves appearing at the left edge don't look like an artifact. Zone extents are stored in each run's `params.json` (and re-derived for older runs)
+- **Scale bars** — separate labelled horizontal and vertical bars (e.g. "2 m"), honest under vertical exaggeration; the applied exaggeration factor is displayed
+- **Person (1.8 m)** — a human silhouette standing on the seabed for instant scale intuition
+- **Units & time** — axes in metres and a `t = … s` timestamp overlay (computed from `timestep_s` × output stride), instead of grid indices and step counts
+- **Plain titles** — auto-generated plain-language titles from the input schema: *"0.08 m waves, 1 s period, 1 m water depth — nonlinear regular wave"* instead of `20260610_155032_viewer_test_streamfunc`
+
+### Comparing runs
+
+The **Runs** panel lists every run from the current session (older on-disk runs behind an *"include runs from earlier sessions"* toggle). Selecting several runs shows each in its own plot side by side, while **everything else is linked**: playback time, play/pause, view mode, all annotation toggles, and (via *Lock scales*) the elevation scale, so amplitudes are directly comparable.
+
+Useful URL parameters: `?compare=id1,id2` (side-by-side), `?view=section|heatmap|surface` (initial view), `?format=png` (open paused on the final snapshot).
+
+The classic `animation.gif` / `final.png` files are still rendered and remain available as download links on the page.
 
 ---
 
@@ -365,6 +422,12 @@ Once connected, open Claude Desktop and try:
 **Detailed output:**
 > *Get the detailed free-surface time series from the last run*
 
+**Visualization:**
+> *Show me the wave animation* — returns a localhost link to the interactive viewer
+
+**Visual comparison:**
+> *Compare the linear and nonlinear runs side by side* — opens both runs next to each other with linked playback and scales
+
 ---
 
 ## Technical notes
@@ -373,7 +436,10 @@ Once connected, open Claude Desktop and try:
 OceanWave3D's `.inp` format uses inline comments (`<- description`) that gfortran's list-directed reader treats as an end-of-record marker. Without them, the reader silently consumes tokens across line boundaries, misaligning all parameters and causing the solver to hang indefinitely with an empty log file. All generated `.inp` files include these markers.
 
 **Output files**  
-Each run creates an isolated directory under `simulations/`. OceanWave3D writes one `fort.NNN` ASCII file per stored time snapshot (columns: x, y, E, P). `fort.999` contains bathymetry (water depth), not wave elevation, and is excluded from statistics. The range `fort.100`–`fort.898` contains wave-field snapshots.
+Each run creates an isolated directory under `simulations/`. OceanWave3D writes one `fort.NNN` ASCII file per stored time snapshot (columns: x, y, E, P). `fort.999` contains bathymetry (water depth), not wave elevation, and is excluded from statistics. The range `fort.100`–`fort.898` contains wave-field snapshots. `params.json` stores the resolved input parameters, including the generation/absorption zone extents used by the viewer's zone annotations.
+
+**Viewer server**  
+The interactive viewer binds to `127.0.0.1` on port 8417 (falling back to an OS-assigned port if taken), starts lazily on the first `get_visualization_link` call, and runs as a daemon thread that exits with the MCP server. It serves only files inside run directories under `simulations/` plus its own static assets — no directory listings, no path traversal.
 
 **Minimum grid requirements**  
 The default finite-difference stencil uses order γ=3, requiring at least Nz=7 vertical layers. The inp builder enforces a minimum of Nz=9.

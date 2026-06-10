@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OceanWave3D viewer</title>
+<style>
+  :root {
+    --bg: #1a1d21; --panel: #23272d; --border: #3a4048;
+    --fg: #e8e8e8; --muted: #9aa3ad; --accent: #6ab0f3;
+  }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; background: var(--bg); color: var(--fg);
+         margin: 0; min-height: 100vh; }
+  header { display: flex; align-items: center; gap: 1rem; padding: .7rem 1.2rem;
+           border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  h1 { font-size: 1.05rem; font-weight: 600; margin: 0; }
+  #subtitle { color: var(--muted); font-size: .75rem; font-family: ui-monospace, monospace; }
+  .spacer { flex: 1; }
+  button, select { background: var(--panel); color: var(--fg); border: 1px solid var(--border);
+           border-radius: 6px; padding: .35rem .7rem; font-size: .85rem; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  a { color: var(--accent); }
+
+  #controls { display: flex; gap: 1.2rem; align-items: flex-start; flex-wrap: wrap;
+              padding: .6rem 1.2rem; border-bottom: 1px solid var(--border);
+              background: var(--panel); }
+  fieldset { border: 1px solid var(--border); border-radius: 8px; margin: 0;
+             padding: .35rem .7rem .5rem; }
+  legend { font-size: .7rem; color: var(--muted); text-transform: uppercase;
+           letter-spacing: .06em; padding: 0 .3rem; }
+  fieldset label { display: inline-flex; align-items: center; gap: .3rem;
+                   font-size: .82rem; margin-right: .8rem; cursor: pointer;
+                   white-space: nowrap; line-height: 1.7; }
+  fieldset input { accent-color: var(--accent); cursor: pointer; }
+
+  #playbar { display: flex; align-items: center; gap: .6rem; flex: 1;
+             min-width: 280px; padding-top: .4rem; }
+  #play { width: 2.4rem; }
+  #time-slider { flex: 1; accent-color: var(--accent); cursor: pointer; }
+  #time-readout { font-family: ui-monospace, monospace; font-size: .85rem;
+                  min-width: 7.5rem; text-align: right; }
+
+  #plots { display: grid; gap: .8rem; padding: .9rem 1.2rem;
+           grid-auto-flow: column; grid-auto-columns: 1fr; }
+  .plot-panel { background: var(--panel); border: 1px solid var(--border);
+                border-radius: 8px; padding: .5rem .6rem .6rem; min-width: 0; }
+  .plot-head { display: flex; align-items: baseline; gap: .5rem; padding: 0 .2rem .4rem; }
+  .plot-title { font-size: .85rem; font-weight: 600; overflow: hidden;
+                text-overflow: ellipsis; white-space: nowrap; }
+  .plot-id { color: var(--muted); font-size: .68rem; font-family: ui-monospace, monospace;
+             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .plot-close { margin-left: auto; border: none; background: none; color: var(--muted);
+                font-size: .9rem; padding: 0 .2rem; }
+  .plot-close:hover { color: #e66; }
+  canvas { display: block; width: 100%; border-radius: 4px; background: #fff;
+           touch-action: none; }
+
+  #runs-panel { position: absolute; right: 1.2rem; top: 3.2rem; z-index: 10;
+                background: var(--panel); border: 1px solid var(--border);
+                border-radius: 8px; padding: .8rem 1rem; max-height: 70vh;
+                overflow-y: auto; box-shadow: 0 6px 24px rgba(0,0,0,.5);
+                min-width: 22rem; }
+  #runs-panel h2 { font-size: .8rem; margin: 0 0 .5rem; color: var(--muted);
+                   text-transform: uppercase; letter-spacing: .06em; }
+  #runs-list { list-style: none; padding: 0; margin: .5rem 0 0; }
+  #runs-list li { padding: .25rem 0; border-bottom: 1px solid #2c3138; }
+  #runs-list label { display: flex; align-items: baseline; gap: .5rem;
+                     font-size: .82rem; cursor: pointer; }
+  #runs-list .run-id { color: var(--muted); font-size: .68rem;
+                       font-family: ui-monospace, monospace; display: block; }
+  .badge { background: #2d5a2d; color: #b8e6b8; border-radius: 4px;
+           font-size: .62rem; padding: .05rem .35rem; vertical-align: middle; }
+  #show-all-label { font-size: .78rem; color: var(--muted); display: flex;
+                    gap: .4rem; align-items: center; cursor: pointer; }
+
+  #empty-state { text-align: center; color: var(--muted); padding: 4rem 1rem; }
+  footer { padding: .4rem 1.2rem 1rem; color: var(--muted); font-size: .75rem; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1 id="main-title">OceanWave3D viewer</h1>
+    <div id="subtitle"></div>
+  </div>
+  <div class="spacer"></div>
+  <button id="runs-btn" title="Select runs to display side by side">Runs ▾</button>
+  <div id="runs-panel" hidden>
+    <h2>Select runs to show side by side</h2>
+    <label id="show-all-label"><input type="checkbox" id="show-all-runs">
+      include runs from earlier sessions</label>
+    <ul id="runs-list"></ul>
+  </div>
+</header>
+
+<div id="controls">
+  <fieldset>
+    <legend>View</legend>
+    <label><input type="radio" name="view" value="section" checked> Cross-section</label>
+    <label><input type="radio" name="view" value="heatmap"> Heatmap (x–t)</label>
+    <label><input type="radio" name="view" value="surface"> 3D surface</label>
+  </fieldset>
+  <fieldset>
+    <legend>Annotations</legend>
+    <label title="Solid water below the surface, sand below the seabed, sky above">
+      <input type="checkbox" id="opt-fill" checked> Fill water</label>
+    <label title="Show the bottom profile"><input type="checkbox" id="opt-seabed" checked> Seabed</label>
+    <label title="Shade wave generation / absorption zones"><input type="checkbox" id="opt-zones" checked> Zones</label>
+    <label title="Labeled horizontal and vertical scale bars"><input type="checkbox" id="opt-scalebar" checked> Scale bars</label>
+    <label title="1.8 m human silhouette standing on the seabed"><input type="checkbox" id="opt-person"> Person (1.8 m)</label>
+    <label title="Axes in metres and a t = … s timestamp"><input type="checkbox" id="opt-axes" checked> Units &amp; time</label>
+  </fieldset>
+  <fieldset>
+    <legend>Display</legend>
+    <label title="Plain-language titles instead of run IDs"><input type="checkbox" id="opt-plaintitle" checked> Plain titles</label>
+    <label title="Show the whole water column down to the seabed"><input type="checkbox" id="opt-fulldepth" checked> Full depth</label>
+    <label title="Use the same elevation scale for all compared runs"><input type="checkbox" id="opt-lockscales" checked> Lock scales</label>
+  </fieldset>
+  <div id="playbar">
+    <button id="play" title="Play / pause">⏸</button>
+    <input type="range" id="time-slider" min="0" max="1" step="any" value="0">
+    <span id="time-readout">t = 0.00 s</span>
+    <select id="speed" title="Playback speed">
+      <option value="0.25">0.25×</option>
+      <option value="0.5">0.5×</option>
+      <option value="1" selected>1×</option>
+      <option value="2">2×</option>
+      <option value="4">4×</option>
+    </select>
+  </div>
+</div>
+
+<main>
+  <div id="empty-state" hidden>
+    <p>No run selected.</p>
+    <p>Open the <strong>Runs</strong> panel (top right) and pick one or more runs.</p>
+  </div>
+  <div id="plots"></div>
+</main>
+
+<footer id="downloads"></footer>
+
+<script src="/static/viewer.js"></script>
+</body>
+</html>

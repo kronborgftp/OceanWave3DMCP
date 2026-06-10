@@ -26,6 +26,11 @@ BINARY_PATH = _REPO_ROOT / "bin" / _BINARY_NAME
 SIMULATIONS_DIR = _REPO_ROOT / "simulations"
 
 INP_FILENAME = "input.inp"
+
+# Run IDs created by THIS server process, in creation order. The localhost
+# viewer uses it to present "runs from this session" for side-by-side
+# comparison; older on-disk runs remain reachable behind a "show all" toggle.
+SESSION_RUN_IDS: list = []
 # Hard wall-clock limit per simulation. Kept BELOW the Claude Desktop MCP client's
 # ~240 s request timeout so a slow or diverging run returns a clean "timed out"
 # RunResult instead of the client aborting the tool call with "request expired /
@@ -106,6 +111,8 @@ def run_simulation(inp_content: str, label: str = "", params: dict | None = None
         except FileExistsError:
             n += 1
             run_id = f"{base_id}_{n}"
+
+    SESSION_RUN_IDS.append(run_id)
 
     inp_path = run_dir / INP_FILENAME
     inp_path.write_text(inp_content)
