@@ -9,10 +9,13 @@ Exposes tools to the LLM:
   5. get_visualization_link — localhost link to the interactive viewer
                               (animated, annotated, side-by-side comparison;
                               chat clients render inline PNG but not GIFs)
-  6. check_installation    — is OceanWave3D built and ready?
-  7. install_oceanwave3d   — build OceanWave3D from the licensed source files
-  8. installation_status   — progress of an in-flight build
-  9. check_version         — which build of this server is running?
+  6. generate_kinematics_visualization — run OceanWave3D's own ReadKinematics.m
+                              (via Octave) to plot subsurface velocity/pressure
+                              kinematics the free-surface views don't show
+  7. check_installation    — is OceanWave3D built and ready?
+  8. install_oceanwave3d   — build OceanWave3D from the licensed source files
+  9. installation_status   — progress of an in-flight build
+ 10. check_version         — which build of this server is running?
 """
 import json
 from pathlib import Path
@@ -69,6 +72,17 @@ unchanged. Any text you add is wrong by definition.
 • To compare runs visually, pass compare_with="other_run_id" to
   get_visualization_link — the viewer shows the runs side by side with
   linked playback, toggles, and scales.
+• Subsurface kinematics (flow BELOW the surface — velocity field, velocity
+  potential, shear through the water column): call
+  generate_kinematics_visualization(run_id="..."). It runs OceanWave3D's own
+  ReadKinematics.m script (via Octave) and returns a localhost viewer LINK
+  (opening the Kinematics tab). Present that link as a clickable markdown link,
+  exactly like get_visualization_link — do NOT try to embed the figures inline
+  (chat clients don't render them). Use this when the user asks about
+  velocities, the flow under the wave, particle motion, or kinematics — the
+  free-surface views can't show that. (Requires Octave; if it's missing, or the
+  run produced no kinematics data, the tool returns a one-line explanation
+  instead of a link — relay it.)
 • The image or link MUST appear in your final, user-visible response.
   NEVER show it only inside a thinking/reasoning block — the user cannot
   see content there. If you called the tool while reasoning, repeat the
@@ -86,9 +100,10 @@ mcp = FastMCP("OceanWave3D", instructions=_SERVER_INSTRUCTIONS)
 
 # Bump these whenever you change the server, then verify with check_version()
 # that Claude Desktop picked up the new code.
-_VERSION = "0.4"
-_VERSION_MESSAGE = ("Interactive viewer: annotated cross-section, heatmap, "
-                    "3D surface, side-by-side run comparison")
+_VERSION = "0.7"
+_VERSION_MESSAGE = ("Interactive viewer (cross-section, heatmap, 3D, compare) "
+                    "+ subsurface kinematics via OceanWave3D's ReadKinematics.m, "
+                    "shown in the viewer's Kinematics tab via a browser link")
 
 
 # ---------------------------------------------------------------------------
@@ -528,6 +543,89 @@ def get_visualization_link(run_id: str, format: str = "gif",
         "user toggle annotations (water fill, seabed, zones, scale bars), "
         "switch between cross-section, heatmap, and 3D surface views, and "
         "compare runs from this session side by side. It is served from this "
+        "machine (localhost only) and stays available while the OceanWave3D "
+        "MCP server is running."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tool 6: generate_kinematics_visualization
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def generate_kinematics_visualization(run_id: str,
+                                      x_index: Optional[int] = None) -> str:
+    """
+    Show OceanWave3D's OWN subsurface-kinematics figures for a completed run, in
+    the interactive browser viewer.
+
+    Unlike generate_visualization (which shows the free surface), this exposes
+    what the flow is doing *below* the surface — the velocity field, velocity
+    potential and shear through the water column. That data is written by the
+    solver to a binary kinematics file (Kinematics0N.bin) in every run but is
+    not shown by the free-surface views.
+
+    The figures are produced by OceanWave3D's own bundled post-processing script
+    (utils/matlab/IO/ReadKinematics.m), run through GNU Octave — they are NOT
+    Claude-generated. The six panels shown are:
+      • surface elevation eta(t) at a column and eta(x) at the final time
+      • vertical profiles of velocity potential phi(sigma)
+      • vertical profiles of horizontal velocity u(sigma)
+      • vertical profiles of vertical velocity w(sigma)
+      • vertical profiles of shear du/dz(sigma)
+
+    This tool generates the figures, then returns a localhost link that opens
+    them in the interactive viewer (on its Kinematics tab) — the SAME way
+    get_visualization_link presents the animation, heatmap and 3D views. Chat
+    clients do not render tool-result images inline, so present the link; do
+    NOT try to draw your own velocity/pressure plots.
+
+    Parameters
+    ----------
+    run_id : str
+        The run ID returned by run_simulation().
+    x_index : int, optional
+        1-based horizontal grid column for the vertical-profile plots.
+        Defaults to mid-domain (the most physically active column).
+
+    Returns
+    -------
+    A localhost viewer URL (open the Kinematics tab). If GNU Octave is missing
+    or the run produced no kinematics data, returns a one-line explanation
+    instead — relay it to the user.
+
+    IMPORTANT: put the returned URL in your final, user-visible response as a
+    clickable markdown link. A link mentioned only inside thinking/reasoning
+    is invisible to the user.
+    """
+    from .runner import SIMULATIONS_DIR
+    from . import octave_viz, viewer_server
+
+    run_dir = SIMULATIONS_DIR / run_id
+    if not run_dir.exists():
+        return (
+            f"ERROR: run directory '{run_id}' not found. "
+            "Check the run_id returned by run_simulation()."
+        )
+
+    # Generate the figures up front so the viewer shows them immediately on open,
+    # and so an Octave-missing / empty-run problem surfaces here as a clear chat
+    # message rather than an empty viewer tab. Both raise RuntimeError with an
+    # actionable message.
+    try:
+        octave_viz.generate_kinematics_plots(run_dir, x_index=x_index)
+    except RuntimeError as exc:
+        return str(exc)
+
+    url = viewer_server.view_url(run_id, view="kinematics")
+    return (
+        f"Interactive kinematics viewer ready: {url}\n\n"
+        f"Present it to the user in your visible response as a markdown link, "
+        f"e.g. [Open the subsurface kinematics in your browser]({url}). The "
+        "page opens on the Kinematics tab showing OceanWave3D's own "
+        "ReadKinematics.m figures (surface elevation, and vertical profiles of "
+        "velocity potential, horizontal/vertical velocity and shear), each as a "
+        "separate panel with a Regenerate control. It is served from this "
         "machine (localhost only) and stays available while the OceanWave3D "
         "MCP server is running."
     )

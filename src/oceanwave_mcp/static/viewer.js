@@ -714,6 +714,7 @@ function rebuildPanels() {
   updateDownloads();
   sizeCanvases();
   syncPlaybar();
+  applyViewVisibility();   // refresh the kinematics gallery if it's the active view
 }
 
 function updateHeader() {
@@ -867,6 +868,143 @@ function escapeHtml(s) {
 }
 
 // ---------------------------------------------------------------------------
+// Kinematics view — OceanWave3D's own ReadKinematics.m figures (static PNGs)
+// ---------------------------------------------------------------------------
+
+function applyViewVisibility() {
+  const kin = state.view === 'kinematics';
+  $('#plots').hidden = kin;
+  $('#kinematics').hidden = !kin;
+  // The cross-section annotations, display options and playback timeline are
+  // meaningless for the static ReadKinematics.m figures — hide them so the
+  // Kinematics view only shows controls that actually do something (the view
+  // selector and the run picker).
+  ['#annot-controls', '#display-controls', '#playbar'].forEach((sel) => {
+    const el = $(sel);
+    if (el) el.hidden = kin;
+  });
+  if (kin) {
+    renderKinematics();
+  } else {
+    // #plots may have been hidden (display:none) when its canvases were last
+    // sized — e.g. the page opened straight on the Kinematics tab — leaving
+    // them 0-width and blank. Re-measure now that they're visible, then redraw.
+    sizeCanvases();
+  }
+}
+
+function renderKinematics() {
+  const container = $('#kinematics');
+  container.innerHTML = '';
+  const runs = loadedRuns();
+  if (!runs.length) {
+    container.innerHTML =
+      '<p class="kin-note">No run selected. Open the <strong>Runs</strong> ' +
+      'panel (top right) and pick a run.</p>';
+    return;
+  }
+  runs.forEach((run) => {
+    const box = document.createElement('div');
+    box.className = 'kin-run';
+    const h = document.createElement('h3');
+    h.textContent = titleFor(run);
+    const sub = document.createElement('div');
+    sub.className = 'kin-sub';
+    sub.textContent = run.run_id;
+    const body = document.createElement('div');
+    box.appendChild(h);
+    box.appendChild(sub);
+    box.appendChild(body);
+    container.appendChild(box);
+    loadKinematics(run, body, false);
+  });
+}
+
+async function loadKinematics(run, body, generate) {
+  if (generate) {
+    body.innerHTML = '<p class="kin-note">Running OceanWave3D ' +
+      'ReadKinematics.m via Octave… (a few seconds)</p>';
+  } else {
+    body.innerHTML = '<p class="kin-note">Loading…</p>';
+  }
+  let payload;
+  try {
+    const url = '/api/kinematics/' + encodeURIComponent(run.run_id) +
+      (generate ? '?generate=1' : '');
+    payload = await (await fetch(url)).json();
+  } catch (e) {
+    body.innerHTML = '<p class="kin-err">Could not reach the viewer server.</p>';
+    return;
+  }
+
+  body.innerHTML = '';
+  if (payload.figures && payload.figures.length) {
+    payload.figures.forEach((f) => {
+      const fig = document.createElement('figure');
+      fig.className = 'kin-fig';
+      const img = document.createElement('img');
+      img.src = f.url;
+      img.alt = f.title || f.file;
+      img.loading = 'lazy';
+      const cap = document.createElement('figcaption');
+      cap.textContent = f.title || f.file;
+      const dl = document.createElement('a');     // per-panel PNG download
+      dl.href = f.url;
+      dl.download = f.file;
+      dl.className = 'kin-dl';
+      dl.textContent = 'download PNG';
+      cap.appendChild(document.createTextNode(' · '));
+      cap.appendChild(dl);
+      fig.appendChild(img);
+      fig.appendChild(cap);
+      body.appendChild(fig);
+    });
+    const actions = document.createElement('div');
+    actions.className = 'kin-actions';
+    const dlAll = document.createElement('a');     // grab every panel at once
+    dlAll.href = '/api/kinematics/' + encodeURIComponent(run.run_id) + '/zip';
+    dlAll.download = run.run_id + '_kinematics.zip';
+    dlAll.className = 'kin-dl';
+    dlAll.textContent = 'download all (ZIP)';
+    const re = document.createElement('button');
+    re.textContent = 'Regenerate';
+    re.addEventListener('click', () => loadKinematics(run, body, true));
+    actions.appendChild(dlAll);
+    actions.appendChild(re);
+    body.appendChild(actions);
+    return;
+  }
+
+  if (payload.error) {
+    const p = document.createElement('p');
+    p.className = 'kin-err';
+    p.textContent = payload.error;
+    body.appendChild(p);
+    return;
+  }
+  if (!payload.octave) {
+    body.innerHTML = '<p class="kin-note">GNU Octave is required to render ' +
+      'OceanWave3D\'s kinematics figures, and it was not found on this ' +
+      'machine.</p>';
+    return;
+  }
+  if (!run.has_kinematics_data) {
+    body.innerHTML = '<p class="kin-note">This run has no kinematics output ' +
+      '(Kinematics01.bin) to plot.</p>';
+    return;
+  }
+  const note = document.createElement('p');
+  note.className = 'kin-note';
+  note.textContent = 'OceanWave3D\'s ReadKinematics.m can plot the subsurface ' +
+    'velocity, velocity-potential and shear profiles for this run.';
+  const btn = document.createElement('button');
+  btn.textContent = 'Generate kinematics figures';
+  btn.addEventListener('click', () => loadKinematics(run, body, true));
+  body.appendChild(note);
+  body.appendChild(btn);
+}
+
+// ---------------------------------------------------------------------------
 // Wiring
 // ---------------------------------------------------------------------------
 
@@ -874,6 +1012,7 @@ function wireControls() {
   document.querySelectorAll('input[name="view"]').forEach((r) => {
     r.addEventListener('change', () => {
       state.view = r.value;
+      applyViewVisibility();
       scheduleRender();
     });
   });
@@ -931,7 +1070,7 @@ async function init() {
   const parts = location.pathname.split('/').filter(Boolean);
   const params = new URLSearchParams(location.search);
   const view = params.get('view');
-  if (['section', 'heatmap', 'surface'].includes(view)) {
+  if (['section', 'heatmap', 'surface', 'kinematics'].includes(view)) {
     state.view = view;
     const radio = document.querySelector('input[name="view"][value="' + view + '"]');
     if (radio) radio.checked = true;

@@ -74,6 +74,21 @@
   #show-all-label { font-size: .78rem; color: var(--muted); display: flex;
                     gap: .4rem; align-items: center; cursor: pointer; }
 
+  #kinematics { padding: .9rem 1.2rem; display: grid; gap: .8rem;
+                grid-auto-flow: column; grid-auto-columns: 1fr; }
+  .kin-run { background: var(--panel); border: 1px solid var(--border);
+             border-radius: 8px; padding: .6rem .7rem .8rem; min-width: 0; }
+  .kin-run h3 { font-size: .9rem; margin: 0 0 .2rem; }
+  .kin-sub { color: var(--muted); font-size: .7rem; font-family: ui-monospace, monospace;
+             margin-bottom: .5rem; }
+  .kin-note { color: var(--muted); font-size: .78rem; line-height: 1.5; margin: .3rem 0 .6rem; }
+  .kin-fig { margin: 0 0 1rem; }
+  .kin-fig figcaption { font-size: .78rem; color: var(--muted); margin-top: .25rem; }
+  .kin-fig img { width: 100%; border-radius: 4px; background: #fff; display: block; }
+  .kin-fig figcaption .kin-dl { margin-left: .4rem; font-size: .72rem; }
+  .kin-actions { display: flex; align-items: center; gap: 1rem; margin-top: .5rem; }
+  .kin-err { color: #e88; font-size: .8rem; white-space: pre-wrap; }
+
   #empty-state { text-align: center; color: var(--muted); padding: 4rem 1rem; }
   footer { padding: .4rem 1.2rem 1rem; color: var(--muted); font-size: .75rem; }
   [hidden] { display: none !important; }
@@ -101,8 +116,9 @@
     <label><input type="radio" name="view" value="section" checked> Cross-section</label>
     <label><input type="radio" name="view" value="heatmap"> Heatmap (x–t)</label>
     <label><input type="radio" name="view" value="surface"> 3D surface</label>
+    <label title="Subsurface velocity/pressure profiles from OceanWave3D's ReadKinematics.m"><input type="radio" name="view" value="kinematics"> Kinematics</label>
   </fieldset>
-  <fieldset>
+  <fieldset id="annot-controls">
     <legend>Annotations</legend>
     <label title="Solid water below the surface, sand below the seabed, sky above">
       <input type="checkbox" id="opt-fill" checked> Fill water</label>
@@ -112,7 +128,7 @@
     <label title="1.8 m human silhouette standing on the seabed"><input type="checkbox" id="opt-person"> Person (1.8 m)</label>
     <label title="Axes in metres and a t = … s timestamp"><input type="checkbox" id="opt-axes" checked> Units &amp; time</label>
   </fieldset>
-  <fieldset>
+  <fieldset id="display-controls">
     <legend>Display</legend>
     <label title="Plain-language titles instead of run IDs"><input type="checkbox" id="opt-plaintitle" checked> Plain titles</label>
     <label title="Show the whole water column down to the seabed"><input type="checkbox" id="opt-fulldepth" checked> Full depth</label>
@@ -138,6 +154,7 @@
     <p>Open the <strong>Runs</strong> panel (top right) and pick one or more runs.</p>
   </div>
   <div id="plots"></div>
+  <div id="kinematics" hidden></div>
 </main>
 
 <footer id="downloads"></footer>

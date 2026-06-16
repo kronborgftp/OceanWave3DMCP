@@ -19,6 +19,9 @@ Endpoints:
   /api/runs              JSON list of runs on disk (+ "this session" flags)
   /api/data/<run_id>     JSON payload: params, x grid, η snapshots, times,
                          zones, depth — everything read from solver output
+  /api/kinematics/<run_id>[?generate=1]
+                         list (or run) OceanWave3D's bundled ReadKinematics.m
+                         subsurface-kinematics figures, via Octave
   /static/<file>         viewer assets (html/js/css)
   /files/<run_id>/<f>    raw .gif/.png downloads from a run directory
 
@@ -34,6 +37,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
+from . import octave_viz
 from .output_parser import load_output
 from .runner import SESSION_RUN_IDS, SIMULATIONS_DIR
 
@@ -219,7 +223,41 @@ def _run_payload(run_id: str):
         "session": run_id in SESSION_RUN_IDS,
         "has_gif": (run_dir / _FORMAT_FILES["gif"]).exists(),
         "has_png": (run_dir / _FORMAT_FILES["png"]).exists(),
+        # Subsurface kinematics figures (OceanWave3D's ReadKinematics.m, via
+        # Octave). True only if a NON-EMPTY kinematics binary exists to plot
+        # from — a 0-byte file means the run never time-stepped.
+        "has_kinematics_data": octave_viz.has_kinematics_data(run_dir),
+        "kinematics_ready": (run_dir / "kinematics_index.json").exists(),
     }
+
+
+def _kinematics_payload(run_id: str, generate: bool) -> dict:
+    """List (or generate) the bundled kinematics figures for a run.
+
+    Returns {"figures": [{file,title,url}], "octave": bool, "error": str|None}.
+    Generation runs OceanWave3D's own ReadKinematics.m through Octave.
+    """
+    from . import octave_viz
+
+    run_dir = _safe_run_dir(run_id)
+    if run_dir is None:
+        return {"figures": [], "octave": octave_viz.octave_available(),
+                "error": f"run '{run_id}' not found"}
+
+    error = None
+    if generate:
+        try:
+            octave_viz.generate_kinematics_plots(run_dir)
+        except RuntimeError as exc:  # octave missing / no data / script error
+            error = str(exc)
+
+    figures = [
+        {"file": f["file"], "title": f["title"],
+         "url": f"/files/{quote(run_id)}/{quote(f['file'])}"}
+        for f in octave_viz.list_kinematics_plots(run_dir)
+    ]
+    return {"figures": figures, "octave": octave_viz.octave_available(),
+            "error": error}
 
 
 # ---------------------------------------------------------------------------
@@ -280,6 +318,13 @@ class _Handler(BaseHTTPRequestHandler):
                                 code=404)
             else:
                 self._send_json(payload)
+        elif parts[0] == "api" and len(parts) == 3 and parts[1] == "kinematics":
+            from urllib.parse import parse_qs
+            generate = parse_qs(parsed.query).get("generate", ["0"])[0] == "1"
+            self._send_json(_kinematics_payload(parts[2], generate))
+        elif (parts[0] == "api" and len(parts) == 4 and parts[1] == "kinematics"
+              and parts[3] == "zip"):
+            self._send_kinematics_zip(parts[2])
         elif parts[0] == "files" and len(parts) == 3:
             self._send_image(parts[1], parts[2])
         else:
@@ -308,6 +353,25 @@ class _Handler(BaseHTTPRequestHandler):
             return
         self._send(200, ctype, target.read_bytes())
 
+    def _send_kinematics_zip(self, run_id: str) -> None:
+        """Bundle a run's generated kinematics PNGs into a single ZIP download."""
+        import io
+        import zipfile
+
+        run_dir = _safe_run_dir(run_id)
+        if run_dir is None:
+            self._send_404()
+            return
+        pngs = sorted(run_dir.glob("kinematics_*.png"))
+        if not pngs:
+            self._send_404()
+            return
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for p in pngs:
+                zf.write(p, arcname=p.name)
+        self._send(200, "application/zip", buf.getvalue())
+
 
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
@@ -331,15 +395,19 @@ def ensure_running() -> int:
         return _port
 
 
-def view_url(run_id: str, fmt: str = "gif", compare=None) -> str:
+def view_url(run_id: str, fmt: str = "gif", compare=None, view=None) -> str:
     """Return the browser URL for a run's interactive viewer (starts the server).
 
     fmt sets the initial playback state: "gif" autoplays the animation,
     "png" opens paused on the final snapshot. compare is an optional list of
-    additional run_ids to open side by side with linked controls.
+    additional run_ids to open side by side with linked controls. view selects
+    the initial tab ("section", "heatmap", "surface", "kinematics"); when None
+    the viewer opens on its default cross-section view.
     """
     port = ensure_running()
     url = f"http://127.0.0.1:{port}/view/{quote(run_id)}?format={fmt}"
+    if view:
+        url += "&view=" + quote(view)
     if compare:
         url += "&compare=" + ",".join(quote(r) for r in compare)
     return url
