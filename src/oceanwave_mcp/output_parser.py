@@ -11,6 +11,7 @@ For 2D runs (Ny=1), y is constant and can be ignored.
 """
 import math
 import os
+import statistics
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -31,7 +32,8 @@ class SimulationOutput:
     # --- derived statistics (filled by _compute_stats) ---
     max_elevation: float = 0.0
     min_elevation: float = 0.0
-    wave_height_measured: float = 0.0  # max_E - min_E over last half of run
+    wave_height_measured: float = 0.0  # max_E - min_E over whole domain, last half of run
+    wave_height_interior: float = 0.0  # robust H in the clean propagation interior (see _compute_stats)
     rms_elevation: float = 0.0
     num_snapshots: int = 0
     num_x_points: int = 0
@@ -134,6 +136,26 @@ def _compute_stats(out: SimulationOutput) -> None:
     steady = out.snapshots[len(out.snapshots) // 2 :]
     steady_E = [e for s in steady for e in s.E]
     out.wave_height_measured = max(steady_E) - min(steady_E)
+
+    # Robust wave height in the clean propagation interior. The whole-domain
+    # max-min above is inflated by the generation zone (wave-maker overshoot)
+    # and the absorption zone (small reflections build a standing-wave bump),
+    # so it overstates H for an open propagating-wave run. Here we take each
+    # column's crest-to-trough over the steady window and the MEDIAN across the
+    # central half of the domain: every interior column sweeps the full
+    # crest-trough (= H for a regular wave), and the median ignores the few
+    # zone-adjacent columns that run high. _format_recap uses this for
+    # scenarios that have relaxation zones; closed domains keep the global one.
+    nx = min(len(s.E) for s in steady)
+    if nx >= 4:
+        col_crest_trough = [
+            max(s.E[i] for s in steady) - min(s.E[i] for s in steady)
+            for i in range(nx)
+        ]
+        interior = col_crest_trough[nx // 4 : nx - nx // 4]
+        out.wave_height_interior = statistics.median(interior)
+    else:
+        out.wave_height_interior = out.wave_height_measured
 
     n = len(all_E)
     out.rms_elevation = math.sqrt(sum(e * e for e in all_E) / n) if n else 0.0

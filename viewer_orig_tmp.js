@@ -235,15 +235,10 @@ function drawSection(ctx, W, H, run, idx) {
   // Generation / absorption zones
   if (o.zones && run.zones.length) drawZones(ctx, run, px, mt, ph);
 
-  // Reference person (1.8 m): stands on the seabed when the bottom is in
-  // view, otherwise floats at the still-water line so it stays a usable
-  // scale reference in zoomed or deep-water views, where the seabed is far
-  // below the bottom of the frame.
-  if (o.person) {
-    const seabedInView = depth != null && -depth >= y0 && -depth <= y1;
-    const footZ = seabedInView ? -depth : 0;
-    const hPx = py(footZ) - py(footZ + 1.8);
-    drawPerson(ctx, px(x0 + 0.58 * (x1 - x0)), py(footZ), hPx);
+  // Reference person (1.8 m), standing on the seabed
+  if (o.person && depth != null && -depth >= y0 && -depth <= y1) {
+    const hPx = py(-depth) - py(-depth + 1.8);
+    drawPerson(ctx, px(x0 + 0.58 * (x1 - x0)), py(-depth), hPx);
   }
 
   // Scale bars (separate horizontal/vertical — honest under exaggeration)
@@ -327,11 +322,7 @@ function drawZones(ctx, run, px, mt, ph) {
 }
 
 function drawPerson(ctx, cx, footY, hPx) {
-  if (!(hPx > 0)) return;
-  // Below the size where a silhouette reads as a human, fall back to an
-  // honest, to-scale reference bar + label so the person never silently
-  // vanishes — e.g. a 1.8 m figure in a full-depth view of deep water.
-  if (hPx < 14) { drawPersonTick(ctx, cx, footY, hPx); return; }
+  if (!(hPx > 6)) return;
   const u = hPx / 100;            // person drawn in a 100-unit-tall box
   ctx.save();
   ctx.fillStyle = 'rgba(40,40,45,0.85)';
@@ -351,25 +342,6 @@ function drawPerson(ctx, cx, footY, hPx) {
   ctx.fill();
   ctx.restore();
   haloText(ctx, '1.8 m', cx + 14 * u, footY - 50 * u,
-           { font: '10px system-ui, sans-serif', fill: '#333' });
-}
-
-// Too small for a silhouette: a to-scale 1.8 m bar with end caps + label, so
-// the human reference is honest about scale yet still findable on the canvas.
-function drawPersonTick(ctx, cx, footY, hPx) {
-  ctx.save();
-  ctx.strokeStyle = 'rgba(40,40,45,0.9)';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(cx, footY);
-  ctx.lineTo(cx, footY - hPx);       // exactly 1.8 m at the current scale
-  ctx.moveTo(cx - 3, footY);
-  ctx.lineTo(cx + 3, footY);         // foot cap
-  ctx.moveTo(cx - 3, footY - hPx);
-  ctx.lineTo(cx + 3, footY - hPx);   // head cap
-  ctx.stroke();
-  ctx.restore();
-  haloText(ctx, '1.8 m', cx + 7, footY - hPx - 4,
            { font: '10px system-ui, sans-serif', fill: '#333' });
 }
 

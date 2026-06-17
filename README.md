@@ -75,7 +75,9 @@ OceanWaveMCP/
 │   ├── visualizer.py      # Deterministic GIF/PNG rendering (matplotlib)
 │   ├── viewer_server.py   # Localhost server: data API + interactive viewer
 │   ├── static/            # viewer.html / viewer.js — the interactive viewer app
-│   └── installer.py       # Builds OceanWave3D + deps from licensed source tarballs
+│   ├── installer.py       # Builds OceanWave3D + deps from licensed source tarballs
+│   └── docker_runner.py   # Docker sandbox backend — build the image & run in a container
+├── docker/                # Dockerfile + .dockerignore for the sandbox image
 ├── skills/                # Claude skill governing visualization behaviour
 ├── tests/                 # Manual smoke tests (endpoints, browser screenshots)
 ├── OceanWave3D-Fortran90/ # Git submodule — prof's Fortran source
@@ -140,11 +142,14 @@ Returns a `http://127.0.0.1:...` link that opens the run in the [interactive res
 ### `check_installation()`
 Reports whether the OceanWave3D solver is built and ready, and — if not — exactly what is missing (compiler toolchain, licensed source files, submodule).
 
-### `install_oceanwave3d(paid_files_dir=None)`
-Builds OceanWave3D from the licensed source files (LAPACK/BLAS, SPARSKIT2, Harwell) and links the solver. Runs in the **background** (the build takes several minutes); poll `installation_status()` to follow progress.
+### `install_oceanwave3d(paid_files_dir=None, backend="auto")`
+Builds OceanWave3D from the licensed source files (LAPACK/BLAS, SPARSKIT2, Harwell) and links the solver. Runs in the **background** (the build takes several minutes); poll `installation_status()` to follow progress. `backend` selects how it's built:
+- `"native"` — compile onto this machine (needs gfortran/make, or MSYS2 on Windows).
+- `"docker"` — build a self-contained **sandbox image** and run simulations inside a container (needs only Docker — no Fortran toolchain). See [Docker sandbox](#docker-sandbox-no-fortran-toolchain).
+- `"auto"` (default) — native if a Fortran toolchain is present, otherwise Docker.
 
 ### `installation_status()`
-Reports build progress: `running`, `succeeded`, `failed`, or `none`, plus the tail of the build log for diagnosing failures.
+Reports build progress: `running`, `succeeded`, `failed`, or `none`, the backend in use, plus the tail of the build log for diagnosing failures.
 
 ---
 
@@ -191,7 +196,7 @@ The classic `animation.gif` / `final.png` files are still rendered and remain av
 
 - Python 3.11+
 - Claude Desktop
-- gfortran (macOS/Linux) or MSYS2/MinGW-w64 (Windows)
+- **Either** a Fortran toolchain — gfortran (macOS/Linux) or MSYS2/MinGW-w64 (Windows) — **or** Docker, for the [Docker sandbox](#docker-sandbox-no-fortran-toolchain) backend (no compiler needed)
 
 ### 1. Clone the repository
 
@@ -347,7 +352,69 @@ Progress is tracked via two files under `simulations/.install/`:
 You can also drive the builder directly from a shell for debugging:
 ```bash
 python -m oceanwave_mcp.installer            # prints a prerequisite report (JSON)
-python -m oceanwave_mcp.installer --build    # runs the build in the foreground
+python -m oceanwave_mcp.installer --build    # runs the native build in the foreground
+python -m oceanwave_mcp.installer --build-docker  # builds the Docker sandbox image
+```
+
+### Docker sandbox (no Fortran toolchain)
+
+If you have **Docker** but don't want to install a Fortran compiler (e.g. you'd
+rather not set up MSYS2 on Windows), the MCP can build and run OceanWave3D
+entirely inside a container. You still provide the same three source tarballs in
+the same folder — the container does all the compiling, so there's nothing to
+download or install beyond Docker itself.
+
+**Requirements:**
+
+1. **Docker Desktop** (Windows/macOS) or **Docker Engine** (Linux), installed and
+   running. `check_installation()` reports whether the daemon is reachable.
+2. The same three tarballs in `~/Documents/OceanWave3D_Files` (or `OCEANWAVE3D_FILES`)
+   as the native build — `Harwell.tar.gz`, `SPARSKIT2.tar.gz`, `lapack-3.3.1.tgz`.
+3. The Fortran submodule checked out (`git submodule update --init`).
+
+**Workflow (from the chat) — same tools, just the Docker backend:**
+
+> *Build OceanWave3D in a Docker sandbox* → `install_oceanwave3d(backend="docker")`
+>
+> *(or just)* *Install OceanWave3D* → `install_oceanwave3d()` auto-selects Docker
+> when no Fortran toolchain is found.
+
+`install_oceanwave3d(backend="docker")` stages a clean build context (the
+[`docker/Dockerfile`](docker/Dockerfile), the three tarballs, and the submodule
+source) and runs `docker build -t oceanwave3d-mcp:latest` in the background — poll
+`installation_status()` (it reports `Backend: docker`) until it says `succeeded`.
+After that, `run_simulation` automatically executes each run inside the container:
+
+```
+docker run --rm --mount type=bind,source=<run_dir>,target=/work \
+    oceanwave3d-mcp:latest input.inp
+```
+
+Each run's isolated directory under `simulations/` is bind-mounted at `/work`, so
+the solver writes its `fort.*` / `LOG.txt` / `Kinematics*.bin` straight back onto
+the host where the parser and viewer pick them up — the rest of the MCP (output
+parsing, visualizations, the interactive viewer) is unchanged.
+
+**How the image is built.** The Dockerfile mirrors `installer.py` exactly — same
+legacy gfortran flags (`-std=legacy -fallow-argument-mismatch -ffree-line-length-none`)
+and the same `make Release` arguments — on an Ubuntu 22.04 base (gfortran 11; the
+`-fallow-argument-mismatch` flag needs gfortran ≥ 10). It's a multi-stage build:
+the *builder* stage compiles LAPACK/BLAS → SPARSKIT2 → Harwell → OceanWave3D, and
+a slim *runtime* stage carries just the binary plus the gfortran runtime libs.
+`StoreDataVTK.f90` is commented out of the source, so — unlike the original
+upstream Dockerfile — no VTK_IO library is built or linked.
+
+**Backend selection.** By default the runner prefers a native `bin/OceanWave3D`
+when present (no container overhead) and falls back to the Docker image. Force a
+backend with the `OCEANWAVE3D_BACKEND` environment variable (`native` / `docker` /
+`auto`). Override the image tag with `OCEANWAVE3D_IMAGE`.
+
+**Building the image by hand** (optional — the MCP does this for you): drop the
+three tarballs at the repo root (they're gitignored there) and build with the
+repo root as the context:
+
+```bash
+docker build -t oceanwave3d-mcp:latest -f docker/Dockerfile .
 ```
 
 ### 3. Install the Python package

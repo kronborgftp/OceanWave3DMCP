@@ -225,6 +225,17 @@ def check_prerequisites() -> dict:
         and submodule_ready
     )
 
+    # Docker sandbox backend (an alternative to the native build): only the three
+    # tarballs + the submodule + a working Docker daemon are needed — no host
+    # Fortran toolchain. Imported lazily to avoid an installer<->docker_runner cycle.
+    from . import docker_runner
+    docker = docker_runner.status()
+    can_build_docker = (
+        docker["docker_available"]
+        and not missing_files
+        and submodule_ready
+    )
+
     return {
         "tools": tools,
         "missing_tools": missing_tools,
@@ -239,6 +250,11 @@ def check_prerequisites() -> dict:
         "binary_installed": binary_installed,
         "binary_path": str(BINARY_PATH),
         "can_build": can_build,
+        # Docker backend
+        "docker": docker,
+        "can_build_docker": can_build_docker,
+        # True if the solver can run by EITHER backend.
+        "solver_ready": binary_installed or docker["image_built"],
     }
 
 
@@ -463,23 +479,55 @@ def _log_tail(n: int = 40) -> str:
 # Background install orchestration
 # ---------------------------------------------------------------------------
 
-def start_background_install() -> dict:
+def _resolve_backend(prereq: dict, backend: str) -> str:
+    """
+    Decide which build backend to use.
+
+    "auto" prefers the native build when its toolchain is present (a host binary
+    runs without Docker overhead), and falls back to the Docker sandbox when it
+    isn't. "native"/"docker" force a specific backend.
+    """
+    if backend in ("native", "docker"):
+        return backend
+    if backend != "auto":
+        raise ValueError(f"backend must be 'auto', 'native', or 'docker', got {backend!r}")
+    if prereq["can_build"]:
+        return "native"
+    if prereq["can_build_docker"]:
+        return "docker"
+    # Neither is fully ready; report against whichever is closer (Docker if its
+    # daemon is up, else native) so the caller's prereq message is relevant.
+    return "docker" if prereq["docker"]["docker_available"] else "native"
+
+
+def start_background_install(backend: str = "auto") -> dict:
     """
     Validate prerequisites and launch the build in a detached background process.
 
-    Returns {"started": bool, ...}. When started is False, "reason" explains why.
+    `backend` is "auto" (default), "native", or "docker". Returns
+    {"started": bool, "backend": str, ...}; when started is False, "reason"
+    explains why.
     """
     prereq = check_prerequisites()
+    backend = _resolve_backend(prereq, backend)
 
-    if prereq["binary_installed"]:
-        return {"started": False, "reason": "already_installed", "prereq": prereq}
+    already_installed = (
+        prereq["docker"]["image_built"] if backend == "docker"
+        else prereq["binary_installed"]
+    )
+    if already_installed:
+        return {"started": False, "reason": "already_installed",
+                "backend": backend, "prereq": prereq}
 
     status = _read_status()
     if status.get("state") == "running" and _pid_alive(status.get("pid", 0)):
-        return {"started": False, "reason": "already_running", "prereq": prereq}
+        return {"started": False, "reason": "already_running",
+                "backend": backend, "prereq": prereq}
 
-    if not prereq["can_build"]:
-        return {"started": False, "reason": "missing_prerequisites", "prereq": prereq}
+    ready = prereq["can_build_docker"] if backend == "docker" else prereq["can_build"]
+    if not ready:
+        return {"started": False, "reason": "missing_prerequisites",
+                "backend": backend, "prereq": prereq}
 
     INSTALL_STATE_DIR.mkdir(parents=True, exist_ok=True)
     log = open(LOG_FILE, "w")  # fresh log per run
@@ -503,22 +551,33 @@ def start_background_install() -> dict:
         )
     else:
         popen_kwargs["start_new_session"] = True  # POSIX: setsid()
+    build_flag = "--build-docker" if backend == "docker" else "--build"
     proc = subprocess.Popen(
-        [sys.executable, "-m", "oceanwave_mcp.installer", "--build"],
+        [sys.executable, "-m", "oceanwave_mcp.installer", build_flag],
         **popen_kwargs,
     )
-    _write_status(state="running", pid=proc.pid, started=time.time())
-    return {"started": True, "pid": proc.pid, "prereq": prereq}
+    _write_status(state="running", pid=proc.pid, started=time.time(), backend=backend)
+    return {"started": True, "pid": proc.pid, "backend": backend, "prereq": prereq}
+
+
+def _artifact_ready(backend: str) -> bool:
+    """Whether the install's target artifact now exists (binary or image)."""
+    if backend == "docker":
+        from . import docker_runner
+        return docker_runner.image_built()
+    return BINARY_PATH.exists()
 
 
 def installation_status() -> dict:
     """Report on the current/last install: state, elapsed time, and a log tail."""
     status = _read_status()
     state = status.get("state", "none")
+    backend = status.get("backend", "native")
+    artifact_ready = _artifact_ready(backend)
 
     # Reconcile a stale "running" record: the detached process may have exited.
     if state == "running":
-        if BINARY_PATH.exists():
+        if artifact_ready:
             state = "succeeded"
         elif not _pid_alive(status.get("pid", 0)):
             state = "failed"
@@ -527,7 +586,9 @@ def installation_status() -> dict:
     elapsed = (time.time() - started) if started else None
     return {
         "state": state,
+        "backend": backend,
         "elapsed_seconds": elapsed,
+        "artifact_ready": artifact_ready,
         "binary_installed": BINARY_PATH.exists(),
         "error": status.get("error", ""),
         "log_tail": _log_tail(),
@@ -538,25 +599,32 @@ def installation_status() -> dict:
 # CLI entry point (invoked as the detached build process)
 # ---------------------------------------------------------------------------
 
-def _build_main() -> int:
+def _build_main(backend: str = "native") -> int:
     # Normally start_background_install() creates this dir before spawning us, but
-    # `python -m oceanwave_mcp.installer --build` may be run directly, so ensure it.
+    # `python -m oceanwave_mcp.installer --build[-docker]` may be run directly, so
+    # ensure it.
     INSTALL_STATE_DIR.mkdir(parents=True, exist_ok=True)
     with open(LOG_FILE, "a") as log:
         try:
-            build_all(log)
-            _write_status(state="succeeded", finished=time.time(),
+            if backend == "docker":
+                from . import docker_runner
+                docker_runner.build_image_blocking(paid_files_dir(), log)
+            else:
+                build_all(log)
+            _write_status(state="succeeded", backend=backend, finished=time.time(),
                           started=_read_status().get("started"))
             return 0
         except Exception as exc:  # noqa: BLE001
             _log(log, f"\n!!! BUILD FAILED: {exc}")
-            _write_status(state="failed", finished=time.time(), error=str(exc),
-                          started=_read_status().get("started"))
+            _write_status(state="failed", backend=backend, finished=time.time(),
+                          error=str(exc), started=_read_status().get("started"))
             return 1
 
 
 if __name__ == "__main__":
+    if "--build-docker" in sys.argv:
+        sys.exit(_build_main(backend="docker"))
     if "--build" in sys.argv:
-        sys.exit(_build_main())
+        sys.exit(_build_main(backend="native"))
     # Default: print a prerequisite report.
     print(json.dumps(check_prerequisites(), indent=2))

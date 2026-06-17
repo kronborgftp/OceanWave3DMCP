@@ -1,0 +1,37 @@
+# Build context trimming for `docker build -f docker/Dockerfile .`
+# (the automated MCP build stages its own clean context and is unaffected).
+#
+# The image only needs the three source tarballs (Harwell.tar.gz,
+# SPARSKIT2.tar.gz, lapack-3.3.1.tgz, dropped at the repo root — already
+# gitignored) and the OceanWave3D-Fortran90/ source. Everything below is noise.
+
+# Python / tooling
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+.claude/
+.git/
+.env
+
+# MCP application code & assets — not used inside the image
+src/
+tests/
+skills/
+viewer_shots/
+simulations/
+README.md
+
+# Host-built artifacts (the image rebuilds its own)
+bin/
+lib/
+build_deps/
+
+# Heavy / irrelevant parts of the Fortran source tree
+OceanWave3D-Fortran90/build/
+OceanWave3D-Fortran90/.git
+**/.bzr/
+**/.DS_Store

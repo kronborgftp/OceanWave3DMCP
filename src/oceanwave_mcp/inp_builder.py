@@ -19,7 +19,11 @@ SCENARIOS = {
         "description": (
             "Nonlinear regular wave in 2D generated using stream function theory. "
             "Good for studying finite-amplitude (nonlinear) wave propagation. "
-            "Typical parameters: wave height 0.05–0.3 m, depth 0.5–5 m, period 1–10 s."
+            "Works from small flume waves up to real ocean scale (metre-class "
+            "heights in deep or coastal depths). The limiting factor is wave "
+            "steepness H/L, not absolute size: waves close to the breaking limit "
+            "(H/L ≈ 0.1) may fail to converge at initialization. "
+            "Typical parameters: wave height 0.05–5 m, depth 0.5–25 m, period 1–15 s."
         ),
         "parameters": {
             "wave_height":   "Wave height H [m] (crest-to-trough). Default: 0.08",
@@ -30,6 +34,11 @@ SCENARIOS = {
             "vertical_layers": "Number of vertical grid layers Nz. Default: 9",
             "num_periods":   "Simulation duration in wave periods. Default: 15",
             "nonlinear":     "True = fully nonlinear, False = linear equations. Default: True",
+            "stream_func_height_steps": (
+                "Advanced. Height-continuation steps for the steady-wave solve. "
+                "Default 6 (clamped to 60); raise only if a near-breaking wave "
+                "fails to converge."
+            ),
         },
     },
     "linear_regular_wave": {
@@ -105,6 +114,22 @@ def _zone_layout(Lx: float) -> _ZoneLayout:
 
 _MIN_NZ = 9  # stencil gamma=3 → needs 2*3+1=7; use 9 as safe minimum
 
+# Stream-function (Fenton) steady-wave solver controls.
+#
+# n_h_steps is HEIGHT CONTINUATION: the steady wave is reached by ramping the
+# target height up over this many increments, re-solving from the previous
+# solution at each step. More steps = gentler continuation for steep waves.
+# 6 converges the full real-scale test matrix (≤ ~4 m), so it is the default;
+# exposed via run_simulation for near-breaking cases that may need more.
+#
+# Note: the per-step Newton iteration cap (256) and the convergence tolerance
+# are hardcoded in the Fortran solver (stream_func_coeffs.f) and are NOT read
+# from the .inp, so they are intentionally not exposed here — raising them
+# would require editing the solver, which is out of scope.
+_DEFAULT_STREAM_FUNC_HEIGHT_STEPS = 6
+_MAX_STREAM_FUNC_HEIGHT_STEPS = 60
+_STREAM_FUNC_FOURIER_MODES = 24
+
 
 def _zone_params(z: _ZoneLayout) -> list[dict]:
     """User-facing zone annotations stored in params.json for the viewer.
@@ -129,6 +154,7 @@ def build_stream_function_wave(
     vertical_layers: int = 9,
     num_periods: float = 15.0,
     nonlinear: bool = True,
+    stream_func_height_steps: int = _DEFAULT_STREAM_FUNC_HEIGHT_STEPS,
 ) -> tuple[str, dict]:
     """Return (inp_content, resolved_params) for a stream-function wave simulation."""
     H, h, T = wave_height, water_depth, wave_period
@@ -136,6 +162,17 @@ def build_stream_function_wave(
     Lx = domain_length if domain_length else max(8.0 * L, 4.0)
     Nx = grid_points_x
     Nz = max(vertical_layers, _MIN_NZ)
+
+    # Height-continuation steps for the Fenton steady-wave solve. Reject
+    # non-positive values and clamp to a sane ceiling so a typo can't request
+    # thousands of steps.
+    n_h_steps = int(stream_func_height_steps)
+    if n_h_steps < 1:
+        raise ValueError(
+            "stream_func_height_steps must be a positive integer "
+            f"(stream-function height-continuation steps), got {stream_func_height_steps!r}"
+        )
+    n_h_steps = min(n_h_steps, _MAX_STREAM_FUNC_HEIGHT_STEPS)
 
     dt = T / 40.0
     Nsteps = max(1, int(math.ceil(num_periods * T / dt)))
@@ -156,6 +193,7 @@ def build_stream_function_wave(
         "timestep_s": round(dt, 6),
         "num_steps": Nsteps,
         "nonlinear": nonlinear,
+        "stream_func_height_steps": n_h_steps,
         "zones": _zone_params(z),
     }
 
@@ -170,7 +208,17 @@ def build_stream_function_wave(
         f"{Nsteps} {dt:.10f} 1 0 1 <-",
         f"9.82 <-",
         f"1 1 0 23 1e-8 1e-6 1 V 1 1 20 <-",
-        f"{H:.4f} {h:.4f} 1.0 {T:.4f} 0 0. 1 6 24 <-",
+        # Stream-function steady-wave parameters (Fenton). Field order per the
+        # solver's reader (ReadInputFileParameters.f90):
+        #   H  h  L  T  i_wavel_or_per  e_or_s_vel  i_euler_or_stokes  n_h_steps  n_four_modes
+        # Use PERIOD mode (i_wavel_or_per=1) so the solver derives the wavelength
+        # self-consistently from H, h, T and the nondimensional steepness is
+        # physical: H/(g·T²). The earlier WAVELENGTH mode (flag 0) paired with a
+        # dummy L=1.0 made the steepness H/L = H/1.0 = H, so any H ≳ 0.1 exceeded
+        # the breaking limit and the Newton solve diverged regardless of depth or
+        # period. L is still passed (the dispersion estimate) so the deep/finite-
+        # depth branch is classified from a sensible wavenumber.
+        f"{H:.4f} {h:.4f} {L:.4f} {T:.4f} 1 0. 1 {n_h_steps} {_STREAM_FUNC_FOURIER_MODES} <-",
         f"-{stride} 20 1 1 <-",
         f"1 {Nx} 1 1 1 1 1 {Nsteps} 1 <-",
         f"{nonlinear_flag} 0 <-",

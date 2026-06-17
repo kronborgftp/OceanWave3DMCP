@@ -14,6 +14,9 @@ dependencies = [
     "Pillow>=10.0.0",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
 [project.scripts]
 oceanwave-mcp = "oceanwave_mcp.server:main"
 

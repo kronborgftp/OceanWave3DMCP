@@ -12,8 +12,9 @@ Exposes tools to the LLM:
   6. generate_kinematics_visualization — run OceanWave3D's own ReadKinematics.m
                               (via Octave) to plot subsurface velocity/pressure
                               kinematics the free-surface views don't show
-  7. check_installation    — is OceanWave3D built and ready?
-  8. install_oceanwave3d   — build OceanWave3D from the licensed source files
+  7. check_installation    — is OceanWave3D built and ready? (native or Docker)
+  8. install_oceanwave3d   — build OceanWave3D from the licensed source files,
+                             natively or as a Docker sandbox image
   9. installation_status   — progress of an in-flight build
  10. check_version         — which build of this server is running?
 """
@@ -34,7 +35,7 @@ if __package__ in (None, ""):
 
 from . import installer
 from .inp_builder import SCENARIOS, build_inp
-from .runner import run_simulation as _run, RunResult, BINARY_PATH
+from .runner import run_simulation as _run, RunResult, BINARY_PATH, solver_ready
 from .output_parser import snapshots_to_text_table, load_output
 # visualizer is imported lazily inside generate_visualization() to avoid
 # loading matplotlib/Pillow at server startup (would exceed Claude Desktop's
@@ -100,10 +101,12 @@ mcp = FastMCP("OceanWave3D", instructions=_SERVER_INSTRUCTIONS)
 
 # Bump these whenever you change the server, then verify with check_version()
 # that Claude Desktop picked up the new code.
-_VERSION = "0.7"
+_VERSION = "0.8"
 _VERSION_MESSAGE = ("Interactive viewer (cross-section, heatmap, 3D, compare) "
                     "+ subsurface kinematics via OceanWave3D's ReadKinematics.m, "
-                    "shown in the viewer's Kinematics tab via a browser link")
+                    "shown in the viewer's Kinematics tab via a browser link; "
+                    "Docker sandbox backend — build & run the solver in a "
+                    "container from the three tarballs, no Fortran toolchain needed")
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +147,7 @@ def run_simulation(
     vertical_layers: Optional[int] = None,
     num_periods: Optional[float] = None,
     nonlinear: Optional[bool] = None,
+    stream_func_height_steps: Optional[int] = None,
     label: str = "",
 ):
     """
@@ -172,6 +176,12 @@ def run_simulation(
         How many wave periods to simulate (controls total simulation time).
     nonlinear : bool, optional
         True for fully nonlinear equations (default), False for linear.
+    stream_func_height_steps : int, optional
+        For scenario="stream_function_wave". Number of height-continuation
+        steps the Fenton steady-wave solver ramps through to reach the target
+        height (default 6, clamped to 60). Raise it only if a very steep /
+        near-breaking wave fails to converge at initialization; the default
+        converges the full real-scale range. Leave unset for other scenarios.
     label : str, optional
         Human-readable label stored with the run (for later retrieval).
 
@@ -180,13 +190,15 @@ def run_simulation(
     A structured engineering recap table. IMPORTANT: display it exactly as
     returned. Do not rewrite, reformat, summarise, or add commentary of your own.
     """
-    # If the solver isn't built yet, suggest installing it instead of failing cryptically.
-    if not BINARY_PATH.exists():
+    # If the solver isn't ready by EITHER backend (native binary or Docker
+    # sandbox image), suggest installing it instead of failing cryptically.
+    if not solver_ready():
         return (
             "OceanWave3D isn't installed yet, so simulations can't run.\n\n"
             "Next steps:\n"
             "  1. Call check_installation() to see what's needed.\n"
-            "  2. Call install_oceanwave3d() to build it from your licensed source files.\n"
+            "  2. Call install_oceanwave3d() to build it from your licensed source files\n"
+            "     (natively, or as a Docker sandbox if you have Docker but no Fortran toolchain).\n"
             "  3. Poll installation_status() until it reports 'succeeded', then re-run this."
         )
 
@@ -200,6 +212,7 @@ def run_simulation(
         "vertical_layers": vertical_layers,
         "num_periods": num_periods,
         "nonlinear": nonlinear,
+        "stream_func_height_steps": stream_func_height_steps,
     }.items() if v is not None}
 
     try:
@@ -276,9 +289,19 @@ def _format_recap(result: RunResult) -> str:
 
     if out:
         target_H = p.get("wave_height_m")
+        # Scenarios with relaxation zones (generation + absorption) are open
+        # propagating-wave domains: measure H in the clean interior, away from
+        # the wave-maker/absorber transients that inflate a whole-domain
+        # max-min. Closed-domain scenarios (e.g. the standing wave, zones=[])
+        # have their largest crest-trough AT the walls, so keep the global one.
+        has_zones = bool(p.get("zones"))
+        measured_H = out.wave_height_interior if has_zones else out.wave_height_measured
+        measured_label = ("Measured H (steady, mid-domain)" if has_zones
+                          else "Measured H (steady, last 50%)")
+
         dev_row = ""
         if target_H and target_H > 0:
-            pct = 100.0 * abs(out.wave_height_measured - target_H) / target_H
+            pct = 100.0 * abs(measured_H - target_H) / target_H
             dev_row = f"| Deviation from specified H | {pct:.1f}% |"
 
         lines += [
@@ -287,7 +310,7 @@ def _format_recap(result: RunResult) -> str:
             "|---|---|",
             f"| Max surface elevation | {out.max_elevation:+.4f} m |",
             f"| Min surface elevation | {out.min_elevation:+.4f} m |",
-            f"| Measured H (steady, last 50%) | {out.wave_height_measured:.4f} m |",
+            f"| {measured_label} | {measured_H:.4f} m |",
             f"| RMS elevation | {out.rms_elevation:.5f} m |",
         ]
         if dev_row:
@@ -660,18 +683,30 @@ def check_installation() -> str:
     before trying install_oceanwave3d().
     """
     p = installer.check_prerequisites()
+    docker = p["docker"]
 
     if p["binary_installed"]:
-        return f"OceanWave3D is installed and ready at:\n  {p['binary_path']}"
+        return f"OceanWave3D is installed (native build) and ready at:\n  {p['binary_path']}"
+    if docker["image_built"]:
+        return (
+            "OceanWave3D is installed as a Docker sandbox and ready.\n"
+            f"  Image: {docker['image_tag']}\n"
+            "  Simulations run inside the container automatically."
+        )
 
     def mark(ok: bool) -> str:
         return "[OK]" if ok else "[MISSING]"
 
     lines = ["OceanWave3D is NOT installed yet. Build readiness:\n"]
 
-    lines.append("Compiler toolchain:")
+    lines.append("Native build — compiler toolchain:")
     for tool, ok in p["tools"].items():
         lines.append(f"  {mark(ok)} {tool}")
+
+    lines.append("\nDocker sandbox (alternative — no Fortran toolchain needed):")
+    lines.append(f"  {mark(docker['docker_available'])} Docker daemon reachable")
+    if not docker["docker_available"]:
+        lines.append("    Install Docker Desktop / Docker Engine and make sure it's running.")
 
     lines.append(f"\nThird-party source files (folder: {p['files_dir']}):")
     for label, ok in p["tarballs"].items():
@@ -682,8 +717,8 @@ def check_installation() -> str:
         lines.append("  Run: git submodule update --init")
 
     lines.append("")
-    if p["missing_tools"]:
-        lines.append("Install the missing compiler tools first:")
+    if p["missing_tools"] and not docker["docker_available"]:
+        lines.append("Install the missing compiler tools (for a native build):")
         lines.append(f"  {p['tool_install_hint']}")
     if p["missing_files"]:
         lines.append(
@@ -706,8 +741,20 @@ def check_installation() -> str:
             "environment variable.)"
         )
 
-    if p["can_build"]:
-        lines.append("Everything needed is present — call install_oceanwave3d() to build.")
+    if p["can_build"] and p["can_build_docker"]:
+        lines.append(
+            "Everything needed is present for BOTH a native build and the Docker "
+            "sandbox — call install_oceanwave3d() (auto-picks native), or "
+            'install_oceanwave3d(backend="docker") to use the container.'
+        )
+    elif p["can_build"]:
+        lines.append("Everything needed is present — call install_oceanwave3d() to build natively.")
+    elif p["can_build_docker"]:
+        lines.append(
+            "No Fortran toolchain, but Docker is ready and the source files are "
+            'present — call install_oceanwave3d() to build the sandbox image '
+            "(it auto-selects Docker)."
+        )
     else:
         lines.append("Resolve the items above, then call install_oceanwave3d().")
 
@@ -719,13 +766,21 @@ def check_installation() -> str:
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def install_oceanwave3d(paid_files_dir: Optional[str] = None) -> str:
+def install_oceanwave3d(paid_files_dir: Optional[str] = None,
+                        backend: str = "auto") -> str:
     """
-    Build OceanWave3D from the licensed source files and install the binary.
+    Build OceanWave3D from the licensed source files and install it.
 
-    This compiles the third-party libraries (LAPACK/BLAS, SPARSKIT2, Harwell)
-    and links the solver. It runs in the background because it takes several
-    minutes; poll installation_status() to follow progress.
+    Two backends are supported:
+      • "native"  — compiles the third-party libraries (LAPACK/BLAS, SPARSKIT2,
+        Harwell) and links the solver onto this machine (needs a Fortran
+        toolchain: gfortran/make, or MSYS2 on Windows).
+      • "docker"  — builds a self-contained sandbox image from the same three
+        tarballs and runs simulations inside the container (needs only Docker —
+        no Fortran toolchain). Easiest for users without a compiler set up.
+
+    Either way it runs in the background (several minutes); poll
+    installation_status() to follow progress.
 
     Parameters
     ----------
@@ -733,23 +788,32 @@ def install_oceanwave3d(paid_files_dir: Optional[str] = None) -> str:
         Folder containing the licensed tarballs (Harwell.tar.gz, SPARSKIT2.tar.gz,
         lapack-3.3.1.tgz). Defaults to ~/Documents/OceanWave3D_Files or the
         OCEANWAVE3D_FILES environment variable.
+    backend : str, optional
+        "auto" (default — native if a Fortran toolchain is present, else Docker),
+        "native", or "docker".
     """
     import os
     if paid_files_dir:
         os.environ[installer.FILES_DIR_ENV] = paid_files_dir
 
-    result = installer.start_background_install()
+    try:
+        result = installer.start_background_install(backend=backend)
+    except ValueError as exc:
+        return f"ERROR: {exc}"
 
+    chosen = result.get("backend", backend)
     if result["started"]:
+        artifact = ("the Docker sandbox image" if chosen == "docker"
+                    else "bin/OceanWave3D")
         return (
-            "Build started in the background (this takes several minutes).\n"
-            "Poll installation_status() to follow progress; it will report "
-            "'succeeded' when bin/OceanWave3D is ready."
+            f"Build started in the background ({chosen} backend; this takes several "
+            "minutes).\nPoll installation_status() to follow progress; it will "
+            f"report 'succeeded' when {artifact} is ready."
         )
 
     reason = result.get("reason")
     if reason == "already_installed":
-        return "OceanWave3D is already installed — no build needed."
+        return f"OceanWave3D is already installed ({chosen} backend) — no build needed."
     if reason == "already_running":
         return "A build is already running. Call installation_status() to follow it."
 
@@ -775,10 +839,12 @@ def installation_status() -> str:
     if state == "none":
         return "No installation has been started. Call install_oceanwave3d() to begin."
 
-    lines = [f"State: {state}"]
+    backend = s.get("backend", "native")
+    lines = [f"State: {state}", f"Backend: {backend}"]
     if s["elapsed_seconds"] is not None:
         lines.append(f"Elapsed: {s['elapsed_seconds']:.0f} s")
-    lines.append(f"Binary installed: {s['binary_installed']}")
+    artifact = "Sandbox image built" if backend == "docker" else "Binary installed"
+    lines.append(f"{artifact}: {s['artifact_ready']}")
     if s["error"]:
         lines.append(f"Error: {s['error']}")
     if s["log_tail"]:
