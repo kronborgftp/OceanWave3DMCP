@@ -20,16 +20,18 @@ Results can then be explored in an **interactive localhost viewer**: an animated
 
 ### Example result
 
-The prompt above produces:
+The prompt above produces a structured recap — the same four sections every time, so the same question always gets an answer in the same shape:
 
-| Metric | Value |
-|---|---|
-| Max elevation | 0.073 m |
-| Min elevation | −0.065 m |
-| Wave height (steady state) | 0.137 m |
-| RMS elevation | 0.016 m |
+```
+## OceanWave3D — Stream Function Wave
 
-Surface elevation E [m] and velocity potential P [m²/s] across the 46 m domain at a mid-simulation snapshot. The wave is fully developed in the active region (x ≈ 11–17 m) with generation on the left and a calm absorbing zone on the right.
+### [1] Run Info        → scenario, run ID, status, wall time
+### [2] Input Parameters → wave height, depth, period, wavelength, steepness, equations
+### [3] Results          → max/min elevation, measured wave height, RMS, deviation %
+### [4] Output Files     → links to every file the simulation produced
+```
+
+These tables are generated directly from the solver's own output — the assistant displays them as-is rather than rephrasing or adding its own commentary, so what you see is exactly what the simulation computed, every time.
 
 ---
 
@@ -78,7 +80,8 @@ OceanWaveMCP/
 │   ├── installer.py       # Builds OceanWave3D + deps from licensed source tarballs
 │   └── docker_runner.py   # Docker sandbox backend — build the image & run in a container
 ├── docker/                # Dockerfile + .dockerignore for the sandbox image
-├── skills/                # Claude skill governing visualization behaviour
+├── skills/                # Reference notes on visualization behaviour (not auto-loaded —
+│                           #   the binding rules ship inside server.py's MCP instructions)
 ├── tests/                 # Manual smoke tests (endpoints, browser screenshots)
 ├── OceanWave3D-Fortran90/ # Git submodule — prof's Fortran source
 ├── bin/OceanWave3D        # Compiled binary (macOS/Linux, gitignored)
@@ -122,7 +125,7 @@ Runs a simulation and returns statistics.
 | `num_periods` | — | Simulation duration in wave periods (default 15) |
 | `nonlinear` | bool | Fully nonlinear equations (default `true`) |
 
-**Returns:** run ID, wall time, measured wave height, max/min/RMS elevation.
+**Returns:** a structured recap with four fixed sections — Run Info, Input Parameters, Results, and Output Files (see [Example result](#example-result)). The same inputs always produce the same recap.
 
 ---
 
