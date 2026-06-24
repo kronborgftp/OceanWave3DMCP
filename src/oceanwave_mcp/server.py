@@ -19,6 +19,7 @@ Exposes tools to the LLM:
  10. check_version         — which build of this server is running?
 """
 import json
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -229,14 +230,30 @@ def run_simulation(
         tail = (result.stdout + result.stderr)[-800:]
         return f"{result.summary()}\n\nLast console output:\n{tail}"
 
-    # Save GIF to disk (background bonus — never blocks the response)
-    try:
-        from . import visualizer
-        visualizer.generate_and_save_gif(result.run_dir)
-    except Exception:  # noqa: BLE001
-        pass
+    # Pre-render the animation GIF to disk as a background bonus (so the viewer's
+    # download link is ready without a wait). This MUST be off the response's
+    # critical path: the first render in a fresh server process triggers the cold
+    # first `import matplotlib.pyplot` (+ numpy, Pillow) plus a ~100-frame render.
+    # That cost is paid once per process — i.e. on the first run of every new
+    # session — and, crucially, it happens AFTER the solver subprocess returns, so
+    # it is NOT covered by run_simulation's solver timeout. Run synchronously it
+    # pushed the whole first tool call past the client's ~240 s request timeout
+    # (the "cold-start first run times out" bug). Fire-and-forget on a daemon
+    # thread instead; the recap returns immediately.
+    _spawn_background_gif(result.run_dir)
 
     return _format_recap(result)
+
+
+def _spawn_background_gif(run_dir: str) -> None:
+    """Render run_dir/animation.gif on a daemon thread; never blocks the caller."""
+    def _worker() -> None:
+        try:
+            from . import visualizer
+            visualizer.generate_and_save_gif(run_dir)
+        except Exception:  # noqa: BLE001
+            pass  # best-effort bonus; an explicit visualization call re-renders
+    threading.Thread(target=_worker, name="ow3d-gif-render", daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
@@ -860,7 +877,37 @@ def installation_status() -> str:
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _start_warmup() -> None:
+    """Pay the one-time, per-process cold-start costs in the background so the
+    user's FIRST run_simulation / visualization isn't the call that pays them.
+
+    Two costs are incurred exactly once per fresh server process — and therefore
+    on every new session, which is why "the first run always times out":
+      • the first `import matplotlib.pyplot` (+ numpy, Pillow): slow on Windows,
+        where the OS / antivirus scans hundreds of binary modules on first load;
+      • the first execution of the freshly built solver .exe: scanned by Windows
+        Defender during process creation, time that is NOT covered by
+        run_simulation's solver timeout.
+    Both are done here on a daemon thread, so neither delays the MCP startup
+    handshake. Entirely best-effort: if warm-up fails or is still running when the
+    first real call arrives, that call simply pays the cost itself, as before.
+    """
+    def _worker() -> None:
+        try:
+            from . import visualizer
+            visualizer.warm_up()  # cold-import matplotlib/Pillow (no render)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from .runner import warm_solver
+            warm_solver()  # pay the solver .exe's first-execution scan
+        except Exception:  # noqa: BLE001
+            pass
+    threading.Thread(target=_worker, name="ow3d-warmup", daemon=True).start()
+
+
 def main() -> None:
+    _start_warmup()
     mcp.run()
 
 

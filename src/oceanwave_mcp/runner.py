@@ -274,3 +274,42 @@ def _make_run_id(label: str) -> str:
     ts = time.strftime("%Y%m%d_%H%M%S")
     safe_label = "".join(c if c.isalnum() else "_" for c in label)[:30]
     return f"{ts}_{safe_label}" if safe_label else ts
+
+
+def warm_solver() -> None:
+    """Execute the native solver once on a tiny throwaway run to move its
+    per-session cold-start cost OFF the user's first real run.
+
+    The first execution of the freshly built OceanWave3D.exe is scanned by
+    Windows Defender during process creation and faulted into the OS page cache;
+    that one-time cost is NOT covered by run_simulation's solver timeout, so on a
+    cold session it can push the first real run past the client's request
+    timeout. Running a trivial sim here (e.g. from a startup daemon thread) pays
+    it up front. Best-effort and silent; a no-op when there's no native binary to
+    warm (the Docker backend has nothing local to scan)."""
+    if select_backend() != "native" or not BINARY_PATH.exists():
+        return
+    import tempfile
+    from .inp_builder import build_inp
+    try:
+        # Smallest cheap valid run: a closed-domain standing wave, coarse grid,
+        # a single period (~tens of steps) — finishes in well under a second.
+        inp, _ = build_inp("nonlinear_standing_wave", num_periods=1, grid_points_x=17)
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        with tempfile.TemporaryDirectory(prefix="ow3d_warm_") as d:
+            run_dir = Path(d)
+            (run_dir / INP_FILENAME).write_text(inp)
+            subprocess.run(
+                [str(BINARY_PATH), INP_FILENAME],
+                cwd=str(run_dir),
+                capture_output=True,
+                text=True,
+                timeout=60,
+                env=_run_env(),
+                stdin=subprocess.DEVNULL,
+                creationflags=(subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0),
+            )
+    except Exception:  # noqa: BLE001
+        pass

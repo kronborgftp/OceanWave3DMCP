@@ -13,6 +13,7 @@ import io
 import json
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 from .output_parser import SimulationOutput, load_output
@@ -24,6 +25,12 @@ _STILL_COLOR = "#999999"
 _GRID_ALPHA  = 0.3
 _DPI         = 100
 _GIF_FPS     = 5
+
+# matplotlib's pyplot keeps a process-global figure registry that is not
+# thread-safe. run_simulation now pre-renders the GIF on a background thread,
+# which can overlap with an explicit generate_visualization() call on a FastMCP
+# worker thread, so serialize all pyplot use behind this lock.
+_RENDER_LOCK = threading.Lock()
 
 
 def _ensure_deps() -> None:
@@ -39,6 +46,19 @@ def _ensure_deps() -> None:
         subprocess.check_call(
             [sys.executable, "-m", "pip", "install", "--quiet"] + needed
         )
+
+
+def warm_up() -> None:
+    """Pay the cold first-import cost of the plotting stack up front, off the
+    critical path. The first `import matplotlib.pyplot` (+ numpy, Pillow) in a
+    fresh process is slow on Windows; doing it here (e.g. from a startup daemon
+    thread) keeps the first real render fast. Imports only — renders nothing."""
+    _ensure_deps()
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot   # noqa: F401
+    import matplotlib.ticker   # noqa: F401
+    from PIL import Image      # noqa: F401
 
 
 def _time_per_snapshot(run_dir: Path) -> float:
@@ -110,7 +130,8 @@ def generate_final_png(run_dir: str) -> bytes:
     out     = _load(run_dir)
     dt_snap = _time_per_snapshot(Path(run_dir))
     i       = len(out.snapshots) - 1
-    return _frame_png(out, i, dt_snap, _y_lim(out), plt, ticker).read()
+    with _RENDER_LOCK:  # pyplot global state is not thread-safe
+        return _frame_png(out, i, dt_snap, _y_lim(out), plt, ticker).read()
 
 
 def generate_gif_bytes(run_dir: str) -> bytes:
@@ -131,10 +152,11 @@ def generate_gif_bytes(run_dir: str) -> bytes:
     dt_snap = _time_per_snapshot(Path(run_dir))
     yl      = _y_lim(out)
 
-    frames = [
-        PILImage.open(_frame_png(out, i, dt_snap, yl, plt, ticker)).copy()
-        for i in range(len(out.snapshots))
-    ]
+    with _RENDER_LOCK:  # pyplot global state is not thread-safe
+        frames = [
+            PILImage.open(_frame_png(out, i, dt_snap, yl, plt, ticker)).copy()
+            for i in range(len(out.snapshots))
+        ]
 
     buf = io.BytesIO()
     frames[0].save(
