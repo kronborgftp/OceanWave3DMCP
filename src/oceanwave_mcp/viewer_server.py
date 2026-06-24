@@ -328,6 +328,12 @@ class _Handler(BaseHTTPRequestHandler):
         elif (parts[0] == "api" and len(parts) == 4 and parts[1] == "kinematics"
               and parts[3] == "zip"):
             self._send_kinematics_zip(parts[2])
+        elif (parts[0] == "api" and len(parts) == 3
+              and parts[1] == "kinematics_field"):
+            self._send_kinematics_overlay(parts[2], "field")
+        elif (parts[0] == "api" and len(parts) == 3
+              and parts[1] == "kinematics_orbits"):
+            self._send_kinematics_overlay(parts[2], "orbits")
         elif parts[0] == "files" and len(parts) == 3:
             self._send_image(parts[1], parts[2])
         else:
@@ -355,6 +361,27 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_404()
             return
         self._send(200, ctype, target.read_bytes())
+
+    def _send_kinematics_overlay(self, run_id: str, kind: str) -> None:
+        """Serve a kinematics overlay payload (kind: "field" or "orbits").
+
+        Both are parsed straight from the run's Kinematics0N.bin (no Octave) and
+        cached. Returns {"<kind>": {...}} or {"<kind>": null} when the run has no
+        usable kinematics data.
+        """
+        run_dir = _safe_run_dir(run_id)
+        if run_dir is None:
+            self._send_json({kind: None, "error": f"run '{run_id}' not found"},
+                            code=404)
+            return
+        from . import kinematics_field
+        loader = (kinematics_field.orbits_payload if kind == "orbits"
+                  else kinematics_field.field_payload)
+        try:
+            data = loader(run_dir)
+        except Exception:  # noqa: BLE001 — a parse failure must not 500 the viewer
+            data = None
+        self._send_json({kind: data})
 
     def _send_kinematics_zip(self, run_id: str) -> None:
         """Bundle a run's generated kinematics PNGs into a single ZIP download."""

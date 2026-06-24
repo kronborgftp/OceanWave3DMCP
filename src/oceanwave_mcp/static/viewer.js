@@ -25,6 +25,8 @@ const state = {
   opts: {
     fill: true, seabed: true, zones: true, scalebar: true, person: false,
     axes: true, plainTitle: true, fullDepth: true, lockScales: true,
+    kinematics: false,   // animated subsurface flow-arrow overlay (section view)
+    orbits: false,       // particle-orbit (kinematics-over-time) overlay
   },
 };
 
@@ -148,6 +150,163 @@ function sectionMargins(W, H) {
   return { ml: o.axes ? 58 : 16, mr: 16, mt: 28, mb: o.axes ? 42 : 16 };
 }
 
+// Kinematics overlays (velocity field + particle orbits), fetched once per run.
+// Map value: data object | null (none/failed) | undefined (loading).
+const kinFields = new Map();
+const kinOrbits = new Map();
+
+function _overlayFor(cache, run, endpoint, key) {
+  const id = run.run_id;
+  if (cache.has(id)) return cache.get(id) || null;
+  cache.set(id, undefined);                       // loading — don't refetch
+  fetch(endpoint + encodeURIComponent(id))
+    .then((r) => (r.ok ? r.json() : {}))
+    .then((p) => { cache.set(id, p[key] || null); scheduleRender(); })
+    .catch(() => { cache.set(id, null); });
+  return null;
+}
+
+const flowFieldFor = (run) => _overlayFor(kinFields, run, '/api/kinematics_field/', 'field');
+const orbitsFor = (run) => _overlayFor(kinOrbits, run, '/api/kinematics_orbits/', 'orbits');
+
+// Speed colour ramp (slow → fast): teal → green → yellow → orange → red.
+const SPEED_STOPS = [
+  [0.0, [56, 178, 172]], [0.25, [102, 187, 106]], [0.5, [255, 213, 79]],
+  [0.75, [255, 138, 60]], [1.0, [229, 57, 53]],
+];
+function speedColor(t) {
+  t = clamp(t, 0, 1);
+  for (let i = 1; i < SPEED_STOPS.length; i++) {
+    if (t <= SPEED_STOPS[i][0]) {
+      const a = SPEED_STOPS[i - 1], b = SPEED_STOPS[i];
+      const f = (t - a[0]) / (b[0] - a[0]);
+      return rgb(lerpColor(a[1], b[1], f));
+    }
+  }
+  return rgb(SPEED_STOPS[SPEED_STOPS.length - 1][1]);
+}
+
+function drawArrow(ctx, x0, y0, x1, y1) {
+  const dx = x1 - x0, dy = y1 - y0, len = Math.hypot(dx, dy);
+  ctx.beginPath();
+  ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+  if (len < 2.5) return;
+  const ah = Math.min(6, len * 0.5), a = Math.atan2(dy, dx);
+  ctx.beginPath();
+  ctx.moveTo(x1, y1);
+  ctx.lineTo(x1 - ah * Math.cos(a - 0.42), y1 - ah * Math.sin(a - 0.42));
+  ctx.lineTo(x1 - ah * Math.cos(a + 0.42), y1 - ah * Math.sin(a + 0.42));
+  ctx.closePath(); ctx.fill();
+}
+
+// Animated subsurface velocity field over the cross-section. Arrows sit on an
+// evenly-spaced grid, are coloured by speed, and have a dark halo for contrast.
+// All u/w data is the solver's own; only the arrow tail uses the data mapping —
+// the vector is scaled in screen pixels so direction is honest under the plot's
+// vertical exaggeration, with a min/max length so every arrow stays readable.
+function drawFlowField(ctx, run, px, py) {
+  if (!run.has_kinematics_data) return;
+  const f = flowFieldFor(run);
+  if (!f || !f.frames.length) return;
+
+  let fi = 0, best = Infinity;
+  for (let i = 0; i < f.times.length; i++) {
+    const d = Math.abs(f.times[i] - state.t);
+    if (d < best) { best = d; fi = i; }
+  }
+  const fr = f.frames[fi], X = f.x, Hd = f.h, sigma = f.sigma;
+
+  if (f._vmax == null) {                 // field-wide peak speed (consistent scale)
+    let m = 1e-6;
+    for (const g of f.frames)
+      for (let c = 0; c < g.u.length; c++)
+        for (let k = 0; k < g.u[c].length; k++)
+          m = Math.max(m, Math.hypot(g.u[c][k], g.w[c][k]));
+    f._vmax = m;
+  }
+  const colPx = X.length > 1 ? Math.abs(px(X[1]) - px(X[0])) : 24;
+  const maxLen = colPx * 0.95, minLen = 6;
+
+  ctx.save();
+  ctx.lineCap = 'round';
+  for (let c = 0; c < X.length; c++) {
+    const h = Hd[c], eta = fr.eta[c], xp = px(X[c]);
+    for (let k = 0; k < sigma.length; k++) {
+      const z = -h + sigma[k] * (h + eta);
+      if (z > eta) continue;
+      const u = fr.u[c][k], w = fr.w[c][k], sp = Math.hypot(u, w);
+      if (sp < 1e-5) continue;
+      const yp = py(z), ang = Math.atan2(-w, u);   // screen angle (+w is up)
+      const L = clamp((sp / f._vmax) * maxLen, minLen, maxLen);
+      const x1 = xp + L * Math.cos(ang), y1 = yp + L * Math.sin(ang);
+      // dark halo first, then the speed-coloured arrow on top
+      ctx.strokeStyle = 'rgba(10,20,30,0.55)'; ctx.fillStyle = 'rgba(10,20,30,0.55)';
+      ctx.lineWidth = 3.2; drawArrow(ctx, xp, yp, x1, y1);
+      const col = speedColor(sp / f._vmax);
+      ctx.strokeStyle = col; ctx.fillStyle = col;
+      ctx.lineWidth = 1.6; drawArrow(ctx, xp, yp, x1, y1);
+    }
+  }
+  ctx.restore();
+}
+
+// Particle orbits: the looping path a water particle traces over a wave period,
+// integrated from the solver's velocity field (kinematics over time). Real
+// orbits are only centimetres wide, so each loop is MAGNIFIED about its centre
+// and drawn in uniform screen scale (so a circle reads as a circle, an ellipse
+// as an ellipse) — the magnification factor is labelled. A dot animates around
+// each loop in sync with the playback.
+function drawOrbits(ctx, run, px, py, ml, mt) {
+  if (!run.has_kinematics_data) return;
+  const o = orbitsFor(run);
+  if (!o || !o.orbits.length) return;
+  const period = o.period > 0 ? o.period : 1;
+
+  // One uniform px-per-metre scale for every orbit's shape (cached). Sized so the
+  // largest orbit is a readable ~30 px radius.
+  if (o._S == null) {
+    let maxExt = 1e-4;
+    for (const orb of o.orbits) {
+      const a = orb.path;
+      let cx = 0, cz = 0;
+      for (const q of a) { cx += q[0]; cz += q[1]; }
+      cx /= a.length; cz /= a.length;
+      orb._c = [cx, cz];
+      for (const q of a) maxExt = Math.max(maxExt, Math.hypot(q[0] - cx, q[1] - cz));
+    }
+    o._S = 30 / maxExt;
+  }
+  const S = o._S;
+
+  ctx.save();
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  for (const orb of o.orbits) {
+    const a = orb.path, c = orb._c, ax = px(c[0]), az = py(c[1]);
+    ctx.beginPath();
+    for (let i = 0; i < a.length; i++) {
+      const sx = ax + (a[i][0] - c[0]) * S, sy = az - (a[i][1] - c[1]) * S;
+      if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+    }
+    ctx.strokeStyle = 'rgba(10,20,30,0.45)'; ctx.lineWidth = 3; ctx.stroke();
+    ctx.strokeStyle = 'rgba(120,230,255,0.95)'; ctx.lineWidth = 1.6; ctx.stroke();
+    // particle dot, cycling around the (magnified) loop with the clock
+    const frac = ((state.t / period) % 1 + 1) % 1;
+    const pt = a[Math.min(a.length - 1, Math.floor(frac * a.length))];
+    const dx = ax + (pt[0] - c[0]) * S, dy = az - (pt[1] - c[1]) * S;
+    ctx.beginPath(); ctx.arc(dx, dy, 3.2, 0, 2 * Math.PI);
+    ctx.fillStyle = '#fff'; ctx.fill();
+    ctx.strokeStyle = 'rgba(10,30,50,0.9)'; ctx.lineWidth = 1; ctx.stroke();
+  }
+  // magnification label (S vs the true horizontal pixels-per-metre)
+  const pxPerM = Math.abs(px(1) - px(0)) || 1;
+  const mag = Math.round(S / pxPerM);
+  if (mag > 1) {
+    haloText(ctx, 'orbits ×' + mag + ' (magnified)', ml + 8, mt + 14,
+             { font: '10px system-ui, sans-serif', fill: '#06506a' });
+  }
+  ctx.restore();
+}
+
 function drawSection(ctx, W, H, run, idx) {
   const o = state.opts;
   const { ml, mr, mt, mb } = sectionMargins(W, H);
@@ -234,6 +393,10 @@ function drawSection(ctx, W, H, run, idx) {
 
   // Generation / absorption zones
   if (o.zones && run.zones.length) drawZones(ctx, run, px, mt, ph);
+
+  // Subsurface kinematics overlays (toggles; cross-section only)
+  if (o.kinematics) drawFlowField(ctx, run, px, py);
+  if (o.orbits) drawOrbits(ctx, run, px, py, ml, mt);
 
   // Reference person (1.8 m): stands on the seabed when the bottom is in
   // view, otherwise floats at the still-water line so it stays a usable
@@ -1050,7 +1213,8 @@ function wireControls() {
     'opt-fill': 'fill', 'opt-seabed': 'seabed', 'opt-zones': 'zones',
     'opt-scalebar': 'scalebar', 'opt-person': 'person', 'opt-axes': 'axes',
     'opt-plaintitle': 'plainTitle', 'opt-fulldepth': 'fullDepth',
-    'opt-lockscales': 'lockScales',
+    'opt-lockscales': 'lockScales', 'opt-kinematics': 'kinematics',
+    'opt-orbits': 'orbits',
   };
   Object.entries(optMap).forEach(([elId, key]) => {
     const el = document.getElementById(elId);
