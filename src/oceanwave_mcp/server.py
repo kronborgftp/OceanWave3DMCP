@@ -109,6 +109,20 @@ unchanged. Any text you add is wrong by definition.
   decide whether to request a different, physically valid wave.
 • To pre-screen a wave without running, use check_wave_feasibility(H, depth, T).
 
+━━━ RUNNING IN A SANDBOX ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+• OceanWave3D can run either natively or inside an isolated Docker sandbox
+  container. If the user asks to "run in a sandbox" (or "in Docker", "in a
+  container", "isolated"), call run_simulation(..., backend="docker"). This
+  forces the containerized solver even when a native build also exists.
+• If the sandbox image isn't built yet, run_simulation will say so — then call
+  install_oceanwave3d(backend="docker") and poll installation_status() until it
+  reports 'succeeded' before re-running. The whole setup ("set OceanWave3D up
+  for yourself, then run it in a sandbox") is: install_oceanwave3d(backend=
+  "docker") → installation_status() → run_simulation(..., backend="docker").
+• Visualizations work the same regardless of backend — the sandbox writes its
+  output to the host, and the image bundles Octave so subsurface kinematics
+  render inside the container too.
+
 ━━━ GENERAL ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 • Same inputs → identical output every time. This is an engineering tool.
 • Do not offer to re-run unless the user asks.
@@ -118,14 +132,16 @@ mcp = FastMCP("OceanWave3D", instructions=_SERVER_INSTRUCTIONS)
 
 # Bump these whenever you change the server, then verify with check_version()
 # that Claude Desktop picked up the new code.
-_VERSION = "0.9"
-_VERSION_MESSAGE = ("Pre-run physical-feasibility gate — run_simulation now refuses "
-                    "physically impossible waves (Miche breaking limit, trough below "
-                    "seabed) before launching the solver, with a non-blocking caution "
-                    "near the breaking limit; new check_wave_feasibility tool to "
-                    "pre-screen a wave without running; interactive viewer "
-                    "(cross-section, heatmap, 3D, compare) + subsurface kinematics via "
-                    "OceanWave3D's ReadKinematics.m; Docker sandbox backend")
+_VERSION = "1.0"
+_VERSION_MESSAGE = ("Per-call sandbox selection — run_simulation(backend=\"docker\") "
+                    "forces the containerized solver even when a native build exists, "
+                    "so a user can ask Claude to set OceanWave3D up and then run in a "
+                    "sandbox end-to-end; the Docker image now bundles Octave so "
+                    "subsurface kinematics render inside the container; portable "
+                    "bind-mount handling (Windows forward-slash paths, SELinux label "
+                    "disable, clearer drive-sharing errors). Plus: pre-run physical-"
+                    "feasibility gate, check_wave_feasibility, and the interactive "
+                    "viewer (cross-section, heatmap, 3D, compare, kinematics).")
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +223,7 @@ def run_simulation(
     nonlinear: Optional[bool] = None,
     stream_func_height_steps: Optional[int] = None,
     label: str = "",
+    backend: Optional[str] = None,
 ):
     """
     Run an OceanWave3D simulation and return a summary of the results.
@@ -242,15 +259,33 @@ def run_simulation(
         converges the full real-scale range. Leave unset for other scenarios.
     label : str, optional
         Human-readable label stored with the run (for later retrieval).
+    backend : str, optional
+        Where to run the solver: "docker" forces the run inside the sandbox
+        container (use this when the user asks to run "in a sandbox", even if a
+        native build is also installed); "native" forces the local binary;
+        "auto" (the default when omitted) prefers native and falls back to the
+        sandbox. The sandbox must be built first (install_oceanwave3d(backend="docker")).
 
     Returns
     -------
     A structured engineering recap table. IMPORTANT: display it exactly as
     returned. Do not rewrite, reformat, summarise, or add commentary of your own.
     """
-    # If the solver isn't ready by EITHER backend (native binary or Docker
-    # sandbox image), suggest installing it instead of failing cryptically.
-    if not solver_ready():
+    if backend is not None and backend not in ("auto", "native", "docker"):
+        return f"ERROR: backend must be 'auto', 'native', or 'docker', got '{backend}'."
+
+    # If the requested backend isn't ready, suggest installing it instead of
+    # failing cryptically. With backend=None this checks the "auto" default
+    # (native binary OR Docker sandbox image).
+    if not solver_ready(backend):
+        if backend == "docker":
+            return (
+                "You asked to run in the Docker sandbox, but its image isn't built yet.\n\n"
+                "Next steps:\n"
+                "  1. Call install_oceanwave3d(backend=\"docker\") to build the sandbox image\n"
+                "     (needs only Docker running + the three source tarballs).\n"
+                "  2. Poll installation_status() until it reports 'succeeded', then re-run this."
+            )
         return (
             "OceanWave3D isn't installed yet, so simulations can't run.\n\n"
             "Next steps:\n"
@@ -284,7 +319,8 @@ def run_simulation(
         return f"ERROR building input file: {exc}"
 
     try:
-        result: RunResult = _run(inp, label=label or scenario, params=params)
+        result: RunResult = _run(inp, label=label or scenario, params=params,
+                                 backend=backend)
     except RuntimeError as exc:
         return f"ERROR: {exc}"
 

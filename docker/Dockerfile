@@ -101,23 +101,43 @@ RUN mkdir -p build \
  && test -x /usr/local/bin/OceanWave3D
 
 # ---------------------------------------------------------------------------
-# Stage 2 — runtime: just the binary plus the gfortran runtime libraries.
+# Stage 2 — runtime: the binary plus the gfortran runtime libraries AND GNU
+# Octave, so OceanWave3D's own subsurface-kinematics post-processing
+# (utils/matlab/IO/ReadKinematics.m) can run inside the sandbox too — a
+# Docker-backend user (who deliberately avoided installing a host toolchain)
+# gets the full visualizer, kinematics included, with nothing extra on the host.
 # ---------------------------------------------------------------------------
 FROM ubuntu:22.04 AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# libgfortran5 (with libquadmath0 / libgcc-s1) is all the dynamically-linked
-# binary needs at run time; the static libs (harwell/skit/lapack/blas) are
-# baked into the executable.
+# - libgfortran5 (+ libquadmath0 / libgcc-s1): all the dynamically-linked solver
+#   needs at run time; the static libs (harwell/skit/lapack/blas) are baked into
+#   the executable.
+# - octave: provides /usr/bin/octave-cli, the headless engine that runs
+#   OceanWave3D's bundled ReadKinematics.m. --no-install-recommends keeps the Qt
+#   GUI / docs out (we only ever invoke octave-cli).
+# - gnuplot-nox: the X-less gnuplot the Octave 'gnuplot' graphics_toolkit drives
+#   to rasterize the kinematics figures to PNG without a display. (Octave's
+#   gnuplot is only a *recommended* dep, dropped by --no-install-recommends, so
+#   it is named explicitly here.)
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libgfortran5 libquadmath0 \
+ && apt-get install -y --no-install-recommends \
+      libgfortran5 libquadmath0 octave gnuplot-nox \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /usr/local/bin/OceanWave3D /usr/local/bin/OceanWave3D
 
+# OceanWave3D's own MATLAB/Octave post-processing scripts, so the kinematics
+# visualization (run via octave-cli with --entrypoint) finds ReadKinematics.m
+# and its helpers at a fixed in-image path. Kept in sync with octave_viz's
+# docker_runner.UTILS_MATLAB_CONTAINER constant.
+COPY --from=builder /build/OceanWave3D-Fortran90/utils/matlab /opt/oceanwave3d/utils/matlab
+
 # Each run bind-mounts its isolated run directory here; the solver reads the
 # input file (argv[1]) and writes fort.* / LOG.txt / Kinematics*.bin into cwd.
+# The kinematics step overrides the entrypoint (--entrypoint octave-cli) but
+# reuses this same working dir / bind mount.
 WORKDIR /work
 ENTRYPOINT ["OceanWave3D"]
 CMD ["input.inp"]

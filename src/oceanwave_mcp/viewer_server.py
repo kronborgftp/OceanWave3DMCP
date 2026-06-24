@@ -241,7 +241,7 @@ def _kinematics_payload(run_id: str, generate: bool) -> dict:
 
     run_dir = _safe_run_dir(run_id)
     if run_dir is None:
-        return {"figures": [], "octave": octave_viz.octave_available(),
+        return {"figures": [], "octave": octave_viz.kinematics_available(),
                 "error": f"run '{run_id}' not found"}
 
     error = None
@@ -256,7 +256,10 @@ def _kinematics_payload(run_id: str, generate: bool) -> dict:
          "url": f"/files/{quote(run_id)}/{quote(f['file'])}"}
         for f in octave_viz.list_kinematics_plots(run_dir)
     ]
-    return {"figures": figures, "octave": octave_viz.octave_available(),
+    # "octave" here means "kinematics can be rendered" — by host Octave OR the
+    # Docker sandbox image (which bundles Octave). Drives the viewer's gate
+    # between the "generate" button and the "not available" note.
+    return {"figures": figures, "octave": octave_viz.kinematics_available(),
             "error": error}
 
 

@@ -40,32 +40,54 @@ TIMEOUT_SECONDS = int(os.environ.get("OCEANWAVE3D_SIM_TIMEOUT", "180"))
 
 # Which execution backend to use: "native" (the compiled bin/OceanWave3D),
 # "docker" (the sandbox container), or "auto" (default — prefer the native
-# binary when present, else the Docker image). Override with OCEANWAVE3D_BACKEND.
+# binary when present, else the Docker image). The session default comes from
+# OCEANWAVE3D_BACKEND; an individual run_simulation() call can override it.
 BACKEND_ENV = "OCEANWAVE3D_BACKEND"
 
+# Cache only POSITIVE (non-None) backend resolutions, keyed by the requested
+# choice. A backend that is ready never becomes un-ready within a session, so
+# this avoids repeating the ~20 s-capped `docker image inspect` probe on every
+# run / readiness check. A None (not-yet-ready) result is never cached, so a
+# freshly built binary/image is picked up on the next call.
+_BACKEND_CACHE: dict[str, str] = {}
 
-def select_backend() -> str | None:
+
+def select_backend(choice: str | None = None) -> str | None:
     """
-    Decide how to run the solver, or return None if it isn't installed by any
-    backend. "auto" prefers the native binary (no container overhead) and falls
-    back to the Docker sandbox image.
+    Decide how to run the solver, or return None if it isn't installed by the
+    requested backend. `choice` is "auto"/"native"/"docker"; None means use the
+    OCEANWAVE3D_BACKEND default (itself defaulting to "auto"). "auto" prefers the
+    native binary (no container overhead) and falls back to the Docker image.
     """
-    choice = os.environ.get(BACKEND_ENV, "auto").strip().lower()
+    if choice is None:
+        choice = os.environ.get(BACKEND_ENV, "auto")
+    choice = (choice or "auto").strip().lower()
+    if choice not in ("auto", "native", "docker"):
+        choice = "auto"
+
+    if choice in _BACKEND_CACHE:
+        return _BACKEND_CACHE[choice]
+
     if choice == "native":
-        return "native" if BINARY_PATH.exists() else None
-    if choice == "docker":
+        result = "native" if BINARY_PATH.exists() else None
+    elif choice == "docker":
         from . import docker_runner
-        return "docker" if docker_runner.image_built() else None
-    # auto
-    if BINARY_PATH.exists():
-        return "native"
-    from . import docker_runner
-    return "docker" if docker_runner.image_built() else None
+        result = "docker" if docker_runner.image_built() else None
+    else:  # auto
+        if BINARY_PATH.exists():
+            result = "native"
+        else:
+            from . import docker_runner
+            result = "docker" if docker_runner.image_built() else None
+
+    if result is not None:
+        _BACKEND_CACHE[choice] = result
+    return result
 
 
-def solver_ready() -> bool:
-    """True if a simulation can run by either the native or the Docker backend."""
-    return select_backend() is not None
+def solver_ready(choice: str | None = None) -> bool:
+    """True if a simulation can run by the requested (or default) backend."""
+    return select_backend(choice) is not None
 
 
 # Solver banners that mean the run bailed out, even though the Fortran STOPs
@@ -164,20 +186,35 @@ class RunResult:
         return "\n".join(lines)
 
 
-def run_simulation(inp_content: str, label: str = "", params: dict | None = None) -> RunResult:
+def run_simulation(inp_content: str, label: str = "", params: dict | None = None,
+                   backend: str | None = None) -> RunResult:
     """
     Write inp_content to a fresh run directory and execute OceanWave3D.
 
+    `backend` is "auto"/"native"/"docker" (None → OCEANWAVE3D_BACKEND default).
+    Pass "docker" to force the simulation to run inside the sandbox container
+    even when a native binary is also present.
+
     Returns a RunResult with parsed output statistics.
-    Raises RuntimeError if the solver isn't installed by any backend
-    (no native binary and no Docker sandbox image).
+    Raises RuntimeError if the requested backend isn't installed.
     """
-    backend = select_backend()
-    if backend is None:
+    resolved = select_backend(backend)
+    if resolved is None:
+        if backend == "docker":
+            raise RuntimeError(
+                "The Docker sandbox image isn't built, so the simulation can't run "
+                "in a sandbox. Build it first: install_oceanwave3d(backend=\"docker\")."
+            )
+        if backend == "native":
+            raise RuntimeError(
+                f"No native binary at {BINARY_PATH}. Build it (install_oceanwave3d) "
+                "or run in the Docker sandbox instead."
+            )
         raise RuntimeError(
             f"OceanWave3D isn't installed: no native binary at {BINARY_PATH} and no "
             "Docker sandbox image. Build it first (install_oceanwave3d) — see README.md."
         )
+    backend = resolved
 
     # Create unique run directory. Run IDs are second-resolution timestamps, so two
     # runs started within the same second would collide — uniquify with a numeric

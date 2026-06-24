@@ -38,6 +38,11 @@ DOCKERFILE = installer._REPO_ROOT / "docker" / "Dockerfile"
 # Staged under build_deps/ so it inherits the existing .gitignore entry.
 BUILD_CONTEXT_DIR = installer.BUILD_DEPS_DIR / ".docker_context"
 
+# Where the Dockerfile copies OceanWave3D's bundled MATLAB/Octave scripts inside
+# the image (see docker/Dockerfile). octave_viz points the in-container Octave
+# driver here when it runs the kinematics post-processing in the sandbox.
+UTILS_MATLAB_CONTAINER = "/opt/oceanwave3d/utils/matlab"
+
 # Short ceiling for the quick liveness/inspect probes so a stuck or unreachable
 # Docker daemon can't hang an MCP tool call. The actual build/run get their own
 # (much longer / caller-supplied) limits.
@@ -192,6 +197,70 @@ def _container_name(run_dir: Path) -> str:
     return f"ow3d_{safe}"[:120]
 
 
+def _mount_source(run_dir: Path) -> str:
+    """Bind-mount `source=` string in the form Docker accepts on this OS.
+
+    On Windows the run dir is a backslash path (D:\\repo\\sim\\<id>). The
+    `--mount` CSV parser mishandles backslashes, so Docker Desktop wants a
+    forward-slash drive path (D:/repo/sim/<id>); Path.as_posix() produces exactly
+    that. Elsewhere the native string is already correct.
+    """
+    if sys.platform == "win32":
+        return run_dir.as_posix()
+    return str(run_dir)
+
+
+def _isolation_args(run_dir: Path) -> list:
+    """Common `docker run` args to bind-mount run_dir at /work, portably.
+
+    Shared by the solver run and the in-container kinematics (Octave) run so the
+    ownership/SELinux handling stays identical for both.
+    """
+    args: list = []
+    # On POSIX run as the host user so bind-mounted outputs aren't root-owned (the
+    # host parser/viewer must read and delete them). Docker Desktop (win/mac) maps
+    # ownership on the host side, so skip there.
+    if sys.platform not in ("win32", "darwin") and hasattr(os, "getuid"):
+        args += ["--user", f"{os.getuid()}:{os.getgid()}"]
+        # On SELinux-enforcing hosts (Fedora/RHEL/CentOS) an unlabeled bind mount
+        # is unreadable/unwritable by the confined container, so the solver would
+        # fail with a cryptic permission error. Disabling label confinement for
+        # this throwaway run avoids relabeling host files and is a harmless no-op
+        # on non-SELinux Linux. (`--mount` has no :z/:Z option, unlike `-v`.)
+        args += ["--security-opt", "label=disable"]
+    args += ["--mount", f"type=bind,source={_mount_source(run_dir)},target=/work"]
+    return args
+
+
+# Substrings of common Docker bind-mount / file-sharing failures. When `docker
+# run` exits non-zero with one of these, the solver never started — surface a
+# targeted hint instead of a misleading "solver reported an error".
+_MOUNT_FAILURE_HINTS = (
+    "is not shared", "not shared from", "drive has not been shared",
+    "filesharing", "file sharing", "mounts denied", "denied the request",
+    "bind source path does not exist", "error while creating mount source path",
+    "are not shared from the host",
+    # Forms Docker emits when a bind source is in a shape/location it can't mount
+    # (legacy Hyper-V backend, path edge cases) — surface the same hint, not a
+    # misleading "solver reported an error".
+    "invalid mount config", "mount path must be absolute", "invalid mount path",
+)
+
+
+def _mount_failure_message(run_dir: Path, stderr: str) -> str:
+    """A clear bind-mount-failure explanation (drive sharing), or '' if unrelated."""
+    low = stderr.lower()
+    if not any(h in low for h in _MOUNT_FAILURE_HINTS):
+        return ""
+    return (
+        "The sandbox container could not access the run directory via the bind "
+        f"mount ({run_dir}). On Windows/macOS, make sure the drive/folder is "
+        "shared with Docker Desktop (Settings → Resources → File sharing), or "
+        "use the WSL2 backend, which shares all drives automatically. "
+        f"Docker error:\n{stderr.strip()}"
+    )
+
+
 def run(run_dir: Path, inp_filename: str, timeout: int) -> ExecResult:
     """
     Execute the solver inside the sandbox container on a prepared run directory.
@@ -210,26 +279,73 @@ def run(run_dir: Path, inp_filename: str, timeout: int) -> ExecResult:
         ))
 
     name = _container_name(run_dir)
-    cmd = [docker, "run", "--rm", "--name", name]
-    # On POSIX, run as the host user so the bind-mounted outputs aren't root-owned.
-    # On Windows/macOS Docker Desktop handles ownership on the host side, so skip.
-    if sys.platform not in ("win32", "darwin") and hasattr(os, "getuid"):
-        cmd += ["--user", f"{os.getuid()}:{os.getgid()}"]
-    cmd += [
-        "--mount", f"type=bind,source={run_dir},target=/work",
-        IMAGE_TAG, inp_filename,
-    ]
+    cmd = [docker, "run", "--rm", "--name", name,
+           *_isolation_args(run_dir), IMAGE_TAG, inp_filename]
 
     try:
         proc = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout,
             stdin=subprocess.DEVNULL, creationflags=_CREATE_NO_WINDOW,
         )
+        # A bind-mount/file-sharing failure means the solver never ran; report it
+        # as a launch error (actionable) rather than a generic solver failure.
+        if proc.returncode != 0:
+            hint = _mount_failure_message(run_dir, proc.stderr)
+            if hint:
+                return ExecResult(launch_error=hint)
         return ExecResult(returncode=proc.returncode,
                           stdout=proc.stdout, stderr=proc.stderr)
     except subprocess.TimeoutExpired:
         # The `docker run` client was killed, but the container keeps running —
         # stop it explicitly so it doesn't linger and hold the bind mount.
+        try:
+            subprocess.run([docker, "kill", name], capture_output=True,
+                           timeout=_PROBE_TIMEOUT, creationflags=_CREATE_NO_WINDOW)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        return ExecResult(timed_out=True)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return ExecResult(launch_error=f"Failed to launch container: {exc}")
+
+
+def run_octave(run_dir: Path, driver_rel: str, timeout: int) -> ExecResult:
+    """
+    Run `octave-cli --norc <driver>` inside the sandbox on a prepared run dir.
+
+    Mirrors run(), but overrides the image entrypoint to Octave so OceanWave3D's
+    bundled ReadKinematics.m post-processing can render its figures inside the
+    container (no host Octave needed). `driver_rel` is the driver script's path
+    RELATIVE to run_dir (e.g. ".kinviz/driver.m"); since run_dir is bind-mounted
+    at /work, the container sees it under /work. The driver writes its PNGs to
+    /work, i.e. straight back into run_dir on the host.
+    """
+    docker = docker_path()
+    if not docker:
+        return ExecResult(launch_error="Docker CLI not found on PATH.")
+    if not image_built():
+        return ExecResult(launch_error=(
+            f"Sandbox image '{IMAGE_TAG}' is not built."
+        ))
+
+    name = _container_name(run_dir) + "_kin"
+    container_driver = "/work/" + driver_rel.replace("\\", "/")
+    cmd = [docker, "run", "--rm", "--name", name,
+           *_isolation_args(run_dir),
+           "--entrypoint", "octave-cli", IMAGE_TAG,
+           "--norc", container_driver]
+
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout,
+            stdin=subprocess.DEVNULL, creationflags=_CREATE_NO_WINDOW,
+        )
+        if proc.returncode != 0:
+            hint = _mount_failure_message(run_dir, proc.stderr)
+            if hint:
+                return ExecResult(launch_error=hint)
+        return ExecResult(returncode=proc.returncode,
+                          stdout=proc.stdout, stderr=proc.stderr)
+    except subprocess.TimeoutExpired:
         try:
             subprocess.run([docker, "kill", name], capture_output=True,
                            timeout=_PROBE_TIMEOUT, creationflags=_CREATE_NO_WINDOW)

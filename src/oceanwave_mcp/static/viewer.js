@@ -1012,8 +1012,9 @@ async function loadKinematics(run, body, generate) {
   }
   if (!payload.octave) {
     body.innerHTML = '<p class="kin-note">GNU Octave is required to render ' +
-      'OceanWave3D\'s kinematics figures, and it was not found on this ' +
-      'machine.</p>';
+      'OceanWave3D\'s kinematics figures. Install it on this machine, or build ' +
+      'the Docker sandbox (which bundles Octave) to render them inside the ' +
+      'container.</p>';
     return;
   }
   if (!run.has_kinematics_data) {

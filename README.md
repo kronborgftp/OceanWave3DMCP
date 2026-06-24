@@ -377,13 +377,21 @@ python -m oceanwave_mcp.installer --build-docker  # builds the Docker sandbox im
 If you have **Docker** but don't want to install a Fortran compiler (e.g. you'd
 rather not set up MSYS2 on Windows), the MCP can build and run OceanWave3D
 entirely inside a container. You still provide the same three source tarballs in
-the same folder — the container does all the compiling, so there's nothing to
-download or install beyond Docker itself.
+the same folder — the container does all the compiling, so there's nothing *you*
+need to compile or install beyond Docker itself. (The image build itself pulls
+the `ubuntu:22.04` base image and a few apt packages, so it needs **internet
+access the first time** — but no Fortran toolchain on your machine.)
 
 **Requirements:**
 
 1. **Docker Desktop** (Windows/macOS) or **Docker Engine** (Linux), installed and
    running. `check_installation()` reports whether the daemon is reachable.
+   On Windows/macOS the run directory is bind-mounted into the container, so the
+   drive must be shared with Docker Desktop — the **WSL2 backend** (default on
+   modern Docker Desktop) shares all drives automatically; with the Hyper‑V
+   backend, enable file sharing for the drive under *Settings → Resources → File
+   sharing*. (On SELinux-enforcing Linux the MCP disables label confinement for
+   the throwaway run container so the bind mount is readable.)
 2. The same three tarballs in `~/Documents/OceanWave3D_Files` (or `OCEANWAVE3D_FILES`)
    as the native build — `Harwell.tar.gz`, `SPARSKIT2.tar.gz`, `lapack-3.3.1.tgz`.
 3. The Fortran submodule checked out (`git submodule update --init`).
@@ -411,19 +419,37 @@ the solver writes its `fort.*` / `LOG.txt` / `Kinematics*.bin` straight back ont
 the host where the parser and viewer pick them up — the rest of the MCP (output
 parsing, visualizations, the interactive viewer) is unchanged.
 
+Each run's container also has GNU Octave, so **subsurface-kinematics figures
+render inside the sandbox too** (`generate_kinematics_visualization`) — a
+Docker-backend user who never installed a host toolchain still gets the full
+visualizer, kinematics included. The free-surface views (animation, heatmap, 3D)
+are rendered on the host from the solver output and never needed Octave.
+
 **How the image is built.** The Dockerfile mirrors `installer.py` exactly — same
 legacy gfortran flags (`-std=legacy -fallow-argument-mismatch -ffree-line-length-none`)
 and the same `make Release` arguments — on an Ubuntu 22.04 base (gfortran 11; the
 `-fallow-argument-mismatch` flag needs gfortran ≥ 10). It's a multi-stage build:
 the *builder* stage compiles LAPACK/BLAS → SPARSKIT2 → Harwell → OceanWave3D, and
-a slim *runtime* stage carries just the binary plus the gfortran runtime libs.
+the *runtime* stage carries the binary, the gfortran runtime libs, and Octave +
+`gnuplot-nox` plus OceanWave3D's bundled `utils/matlab` scripts (for kinematics).
 `StoreDataVTK.f90` is commented out of the source, so — unlike the original
 upstream Dockerfile — no VTK_IO library is built or linked.
 
 **Backend selection.** By default the runner prefers a native `bin/OceanWave3D`
-when present (no container overhead) and falls back to the Docker image. Force a
-backend with the `OCEANWAVE3D_BACKEND` environment variable (`native` / `docker` /
-`auto`). Override the image tag with `OCEANWAVE3D_IMAGE`.
+when present (no container overhead) and falls back to the Docker image. To run a
+specific simulation **in the sandbox even when a native build exists**, just ask
+Claude to "run it in a sandbox" — it calls `run_simulation(..., backend="docker")`.
+To make the sandbox the session-wide default, set the `OCEANWAVE3D_BACKEND`
+environment variable (`native` / `docker` / `auto`) in the MCP server's
+environment. Override the image tag with `OCEANWAVE3D_IMAGE`.
+
+**End-to-end "set it up and run in a sandbox."** From a fresh checkout with only
+Docker installed:
+`install_oceanwave3d(backend="docker")` → poll `installation_status()` until it
+reports `succeeded` → `run_simulation(scenario=..., backend="docker")` →
+`get_visualization_link(run_id=...)` (and `generate_kinematics_visualization` for
+the subsurface flow). Nothing but Docker and the three tarballs is required on
+the host.
 
 **Building the image by hand** (optional — the MCP does this for you): drop the
 three tarballs at the repo root (they're gitignored there) and build with the
