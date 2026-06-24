@@ -11,8 +11,10 @@ recorded snapshots by default, or a single PNG of the final snapshot.
 import importlib.util
 import io
 import json
+import os
 import subprocess
 import sys
+import tempfile
 import threading
 from pathlib import Path
 
@@ -26,11 +28,52 @@ _GRID_ALPHA  = 0.3
 _DPI         = 100
 _GIF_FPS     = 5
 
-# matplotlib's pyplot keeps a process-global figure registry that is not
-# thread-safe. run_simulation now pre-renders the GIF on a background thread,
-# which can overlap with an explicit generate_visualization() call on a FastMCP
-# worker thread, so serialize all pyplot use behind this lock.
+# matplotlib's pyplot keeps a process-global figure registry, and the backend
+# selection + first import are likewise process-global, none of it thread-safe.
+# run_simulation now pre-renders the GIF on a background thread, which can overlap
+# with an explicit generate_visualization() call on a FastMCP worker thread (and
+# with the startup warm_up() thread), so every touch of matplotlib — import,
+# use("Agg"), and rendering — happens under this single lock.
 _RENDER_LOCK = threading.Lock()
+
+
+def _pyplot():
+    """Import the Agg pyplot stack and return (plt, ticker).
+
+    MUST be called with _RENDER_LOCK held: selecting the backend and the first
+    `import matplotlib.pyplot` mutate process-global state and would otherwise
+    race a concurrent render or the warm_up() thread. After the first call these
+    are cheap no-ops (matplotlib caches the backend and the import)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.ticker as ticker
+    return plt, ticker
+
+
+def atomic_write_bytes(path, data: bytes) -> None:
+    """Write `data` to `path` atomically: a temp file in the same directory, then
+    os.replace into place.
+
+    Several code paths render and write the SAME deterministic file (the
+    background pre-render in run_simulation, generate_visualization, and
+    get_visualization_link). A plain write_bytes from two of them at once — or a
+    daemon thread killed by process exit mid-write — leaves a truncated/corrupt
+    file. os.replace is atomic on POSIX and Windows, so any reader sees either the
+    old complete file or the new one, and concurrent writers simply end with the
+    last (identical) bytes winning."""
+    path = Path(path)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _ensure_deps() -> None:
@@ -54,11 +97,9 @@ def warm_up() -> None:
     fresh process is slow on Windows; doing it here (e.g. from a startup daemon
     thread) keeps the first real render fast. Imports only — renders nothing."""
     _ensure_deps()
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot   # noqa: F401
-    import matplotlib.ticker   # noqa: F401
-    from PIL import Image      # noqa: F401
+    with _RENDER_LOCK:  # serialize backend + first import with any live render
+        _pyplot()
+        from PIL import Image  # noqa: F401  (warm Pillow too)
 
 
 def _time_per_snapshot(run_dir: Path) -> float:
@@ -122,16 +163,14 @@ def _load(run_dir: str) -> SimulationOutput:
 def generate_final_png(run_dir: str) -> bytes:
     """Single PNG of the final recorded snapshot. Returns raw PNG bytes."""
     _ensure_deps()
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    import matplotlib.ticker as ticker
-
     out     = _load(run_dir)
     dt_snap = _time_per_snapshot(Path(run_dir))
     i       = len(out.snapshots) - 1
-    with _RENDER_LOCK:  # pyplot global state is not thread-safe
-        return _frame_png(out, i, dt_snap, _y_lim(out), plt, ticker).read()
+    yl      = _y_lim(out)
+    # Backend selection, first import and render all under the one lock.
+    with _RENDER_LOCK:
+        plt, ticker = _pyplot()
+        return _frame_png(out, i, dt_snap, yl, plt, ticker).read()
 
 
 def generate_gif_bytes(run_dir: str) -> bytes:
@@ -142,21 +181,20 @@ def generate_gif_bytes(run_dir: str) -> bytes:
     files — nothing is interpolated or estimated.
     """
     _ensure_deps()
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    import matplotlib.ticker as ticker
     from PIL import Image as PILImage
 
     out     = _load(run_dir)
     dt_snap = _time_per_snapshot(Path(run_dir))
     yl      = _y_lim(out)
 
-    with _RENDER_LOCK:  # pyplot global state is not thread-safe
-        frames = [
-            PILImage.open(_frame_png(out, i, dt_snap, yl, plt, ticker)).copy()
-            for i in range(len(out.snapshots))
-        ]
+    # Render every frame's PNG under the lock (pyplot's figure registry is not
+    # thread-safe); decode the resulting PNG buffers into PIL frames outside it,
+    # so the lock isn't held across the cheap, thread-safe Pillow work.
+    with _RENDER_LOCK:
+        plt, ticker = _pyplot()
+        png_bufs = [_frame_png(out, i, dt_snap, yl, plt, ticker)
+                    for i in range(len(out.snapshots))]
+    frames = [PILImage.open(b).copy() for b in png_bufs]
 
     buf = io.BytesIO()
     frames[0].save(
@@ -172,7 +210,8 @@ def generate_gif_bytes(run_dir: str) -> bytes:
 
 
 def generate_and_save_gif(run_dir: str) -> Path:
-    """Generate the animated GIF and save it to run_dir/animation.gif."""
+    """Generate the animated GIF and save it to run_dir/animation.gif (atomically,
+    since the background pre-render and explicit viz calls can write it at once)."""
     gif_path = Path(run_dir) / "animation.gif"
-    gif_path.write_bytes(generate_gif_bytes(run_dir))
+    atomic_write_bytes(gif_path, generate_gif_bytes(run_dir))
     return gif_path

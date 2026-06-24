@@ -3,20 +3,23 @@ OceanWave3D MCP Server
 
 Exposes tools to the LLM:
   1. list_scenarios        — what simulations can I run?
-  2. run_simulation        — run a simulation and get statistics back
-  3. get_detailed_results  — re-read output from a previous run
-  4. generate_visualization — render GIF/PNG from solver output (not Claude-generated)
-  5. get_visualization_link — localhost link to the interactive viewer
+  2. check_wave_feasibility — is a wave (H, depth, period) physically possible?
+                              (pre-screen; no solver needed)
+  3. run_simulation        — run a simulation and get statistics back
+                             (refuses physically impossible waves up front)
+  4. get_detailed_results  — re-read output from a previous run
+  5. generate_visualization — render GIF/PNG from solver output (not Claude-generated)
+  6. get_visualization_link — localhost link to the interactive viewer
                               (animated, annotated, side-by-side comparison;
                               chat clients render inline PNG but not GIFs)
-  6. generate_kinematics_visualization — run OceanWave3D's own ReadKinematics.m
+  7. generate_kinematics_visualization — run OceanWave3D's own ReadKinematics.m
                               (via Octave) to plot subsurface velocity/pressure
                               kinematics the free-surface views don't show
-  7. check_installation    — is OceanWave3D built and ready? (native or Docker)
-  8. install_oceanwave3d   — build OceanWave3D from the licensed source files,
+  8. check_installation    — is OceanWave3D built and ready? (native or Docker)
+  9. install_oceanwave3d   — build OceanWave3D from the licensed source files,
                              natively or as a Docker sandbox image
-  9. installation_status   — progress of an in-flight build
- 10. check_version         — which build of this server is running?
+ 10. installation_status   — progress of an in-flight build
+ 11. check_version         — which build of this server is running?
 """
 import json
 import threading
@@ -35,6 +38,7 @@ if __package__ in (None, ""):
     __package__ = "oceanwave_mcp"
 
 from . import installer
+from .feasibility import WaveInfeasibleError
 from .inp_builder import SCENARIOS, build_inp
 from .runner import run_simulation as _run, RunResult, BINARY_PATH, solver_ready
 from .output_parser import snapshots_to_text_table, load_output
@@ -93,6 +97,18 @@ unchanged. Any text you add is wrong by definition.
   Claude-generated plots are wrong — they guess the shape instead of reading
   the solver output.
 
+━━━ PHYSICALLY IMPOSSIBLE WAVES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+• Some waves cannot physically exist (e.g. too tall for their depth/period —
+  they would break, or their trough would dig below the seabed). run_simulation
+  checks this BEFORE running and, if the wave is impossible, returns a message
+  beginning "PHYSICALLY IMPOSSIBLE WAVE — SIMULATION REFUSED".
+• When you get that refusal: relay it to the user and state which physical law
+  the wave violates and by how much. Do NOT silently lower the height, lengthen
+  the period, raise the depth, or otherwise tweak parameters and re-run to "make
+  it work" — there is no valid simulation of an impossible wave. Let the USER
+  decide whether to request a different, physically valid wave.
+• To pre-screen a wave without running, use check_wave_feasibility(H, depth, T).
+
 ━━━ GENERAL ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 • Same inputs → identical output every time. This is an engineering tool.
 • Do not offer to re-run unless the user asks.
@@ -102,12 +118,14 @@ mcp = FastMCP("OceanWave3D", instructions=_SERVER_INSTRUCTIONS)
 
 # Bump these whenever you change the server, then verify with check_version()
 # that Claude Desktop picked up the new code.
-_VERSION = "0.8"
-_VERSION_MESSAGE = ("Interactive viewer (cross-section, heatmap, 3D, compare) "
-                    "+ subsurface kinematics via OceanWave3D's ReadKinematics.m, "
-                    "shown in the viewer's Kinematics tab via a browser link; "
-                    "Docker sandbox backend — build & run the solver in a "
-                    "container from the three tarballs, no Fortran toolchain needed")
+_VERSION = "0.9"
+_VERSION_MESSAGE = ("Pre-run physical-feasibility gate — run_simulation now refuses "
+                    "physically impossible waves (Miche breaking limit, trough below "
+                    "seabed) before launching the solver, with a non-blocking caution "
+                    "near the breaking limit; new check_wave_feasibility tool to "
+                    "pre-screen a wave without running; interactive viewer "
+                    "(cross-section, heatmap, 3D, compare) + subsurface kinematics via "
+                    "OceanWave3D's ReadKinematics.m; Docker sandbox backend")
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +152,46 @@ def list_scenarios() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tool 2: run_simulation
+# Tool 2: check_wave_feasibility
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def check_wave_feasibility(
+    wave_height: float,
+    water_depth: float,
+    wave_period: float,
+) -> str:
+    """
+    Check whether a wave is physically possible to simulate, WITHOUT running
+    anything.
+
+    Given a wave height H, still-water depth, and period, this reports whether the
+    wave can exist as a steady propagating wave, the governing breaking limit
+    (Miche: H/L ≤ 0.142·tanh(kd)), the wave's steepness, and its margin to that
+    limit. If the wave is physically impossible (too tall for its depth/period —
+    it would break or its trough would dig below the seabed) it says so and cites
+    the violated law.
+
+    Use this to pre-screen a request before run_simulation, or whenever a user
+    asks whether a given wave "can exist" / "is realistic". Pure physics — it does
+    NOT need the solver installed, and the same inputs always give the same answer.
+
+    Parameters
+    ----------
+    wave_height : float
+        Wave height H in metres (crest to trough).
+    water_depth : float
+        Still-water depth h in metres.
+    wave_period : float
+        Wave period T in seconds.
+    """
+    from .feasibility import check_feasibility, format_report
+    res = check_feasibility(wave_height, water_depth, wave_period)
+    return format_report(res, wave_height, water_depth, wave_period)
+
+
+# ---------------------------------------------------------------------------
+# Tool 3: run_simulation
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
@@ -218,6 +275,11 @@ def run_simulation(
 
     try:
         inp, params = build_inp(scenario, **kwargs)
+    except WaveInfeasibleError as exc:
+        # Physically impossible wave — refuse before any solver work. The message
+        # is the fully-formatted refusal (cites the violated law, tells the
+        # assistant not to silently retry with tweaked parameters).
+        return str(exc)
     except (ValueError, TypeError) as exc:
         return f"ERROR building input file: {exc}"
 
@@ -275,7 +337,14 @@ def _format_recap(result: RunResult) -> str:
     steepness = (p["wave_height_m"] / p["wavelength_m"]
                  if p.get("wave_height_m") and p.get("wavelength_m") else None)
 
-    lines = [
+    # Non-blocking caution for a feasible-but-near-breaking wave. The wave was
+    # valid enough to run; this just flags that it sits close to the breaking
+    # limit (where the steady solve can struggle). Part of the recap, not extra
+    # commentary, so it's exempt from the "no text before the recap" rule.
+    warning = p.get("feasibility_warning")
+    warn_lines = [f"> ⚠️ **Near breaking limit:** {warning}", ""] if warning else []
+
+    lines = warn_lines + [
         f"## OceanWave3D — {scenario_name}",
         "",
         "### [1] Run Info",
@@ -368,7 +437,7 @@ def _format_recap(result: RunResult) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tool 3: get_detailed_results
+# Tool 4: get_detailed_results
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
@@ -438,7 +507,7 @@ def get_detailed_results(run_id: str, max_snapshots: int = 5) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tool 4: generate_visualization
+# Tool 5: generate_visualization
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
@@ -481,8 +550,13 @@ def generate_visualization(run_id: str, format: str = "gif") -> Image:
             return Image(data=visualizer.generate_final_png(str(run_dir)),
                          format="png")
         gif_data = visualizer.generate_gif_bytes(str(run_dir))
-        # Keep a copy on disk for external viewing
-        (run_dir / "animation.gif").write_bytes(gif_data)
+        # Keep a copy on disk for external viewing. Atomic + best-effort: it may
+        # race the background pre-render writing the same file, and the disk copy
+        # is a bonus — a write failure must not stop us returning the image.
+        try:
+            visualizer.atomic_write_bytes(run_dir / "animation.gif", gif_data)
+        except OSError:
+            pass
         return Image(data=gif_data, format="gif")
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(
@@ -492,7 +566,7 @@ def generate_visualization(run_id: str, format: str = "gif") -> Image:
 
 
 # ---------------------------------------------------------------------------
-# Tool 5: get_visualization_link
+# Tool 6: get_visualization_link
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
@@ -569,7 +643,8 @@ def get_visualization_link(run_id: str, format: str = "gif",
             if format == "gif":
                 visualizer.generate_and_save_gif(str(run_dir))
             else:
-                target.write_bytes(visualizer.generate_final_png(str(run_dir)))
+                visualizer.atomic_write_bytes(
+                    target, visualizer.generate_final_png(str(run_dir)))
     except Exception:  # noqa: BLE001
         pass
 
@@ -589,7 +664,7 @@ def get_visualization_link(run_id: str, format: str = "gif",
 
 
 # ---------------------------------------------------------------------------
-# Tool 6: generate_kinematics_visualization
+# Tool 7: generate_kinematics_visualization
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
@@ -687,7 +762,7 @@ def check_version() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tool 6: check_installation
+# Tool 8: check_installation
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
@@ -779,7 +854,7 @@ def check_installation() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tool 7: install_oceanwave3d
+# Tool 9: install_oceanwave3d
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
@@ -839,7 +914,7 @@ def install_oceanwave3d(paid_files_dir: Optional[str] = None,
 
 
 # ---------------------------------------------------------------------------
-# Tool 8: installation_status
+# Tool 10: installation_status
 # ---------------------------------------------------------------------------
 
 @mcp.tool()

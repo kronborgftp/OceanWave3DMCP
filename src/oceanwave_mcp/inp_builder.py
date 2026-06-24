@@ -9,6 +9,14 @@ import math
 from dataclasses import dataclass
 from typing import Optional
 
+from .feasibility import (
+    WaveInfeasibleError,
+    check_feasibility,
+    format_refusal,
+    format_warning,
+    wavenumber,
+)
+
 
 # ---------------------------------------------------------------------------
 # Scenarios exposed to the LLM
@@ -82,12 +90,25 @@ SCENARIOS = {
 # ---------------------------------------------------------------------------
 
 def _wavelength(T: float, h: float, g: float = 9.82) -> float:
-    """Return wavelength L from period T and depth h via iterative dispersion solve."""
-    omega = 2.0 * math.pi / T
-    k = omega**2 / g  # deep-water seed
-    for _ in range(30):
-        k = omega**2 / (g * math.tanh(k * h))
-    return 2.0 * math.pi / k
+    """Return wavelength L from period T and depth h via the dispersion solve.
+
+    Delegates to feasibility.wavenumber so the iterative dispersion solve has a
+    single source of truth shared with the pre-run feasibility checks.
+    """
+    return 2.0 * math.pi / wavenumber(T, h, g)
+
+
+def _enforce_feasibility(H: float, h: float, T: float) -> Optional[str]:
+    """Refuse a physically impossible wave before any solver work.
+
+    Raises WaveInfeasibleError (a ValueError subclass) with a fully-formatted
+    refusal if the wave cannot exist. Otherwise returns a non-blocking warning
+    string for a near-breaking-but-valid wave (or None).
+    """
+    res = check_feasibility(H, h, T)
+    if not res.feasible:
+        raise WaveInfeasibleError(format_refusal(res, H, h, T), res)
+    return format_warning(res, H, h, T) or None
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +179,7 @@ def build_stream_function_wave(
 ) -> tuple[str, dict]:
     """Return (inp_content, resolved_params) for a stream-function wave simulation."""
     H, h, T = wave_height, water_depth, wave_period
+    feasibility_warning = _enforce_feasibility(H, h, T)
     L = _wavelength(T, h)
     Lx = domain_length if domain_length else max(8.0 * L, 4.0)
     Nx = grid_points_x
@@ -195,6 +217,7 @@ def build_stream_function_wave(
         "nonlinear": nonlinear,
         "stream_func_height_steps": n_h_steps,
         "zones": _zone_params(z),
+        "feasibility_warning": feasibility_warning,
     }
 
     # Each line needs a trailing '<-' so gfortran's list-directed reader
@@ -245,6 +268,7 @@ def build_linear_regular_wave(
 ) -> tuple[str, dict]:
     """Return (inp_content, resolved_params) for a linear regular wave simulation."""
     H, h, T = wave_height, water_depth, wave_period
+    feasibility_warning = _enforce_feasibility(H, h, T)
     L = _wavelength(T, h)
     Lx = domain_length if domain_length else max(8.0 * L, 4.0)
     Nx = grid_points_x
@@ -269,6 +293,7 @@ def build_linear_regular_wave(
         "num_steps": Nsteps,
         "nonlinear": False,
         "zones": _zone_params(z),
+        "feasibility_warning": feasibility_warning,
     }
 
     # Linear wave uses IncWaveType=2 (linear irregular/regular), ispec=-1 (monochromatic)
@@ -307,6 +332,7 @@ def build_nonlinear_standing_wave(
 ) -> tuple[str, dict]:
     """Return (inp_content, resolved_params) for a nonlinear standing wave simulation."""
     H, h, T = wave_height, water_depth, wave_period
+    feasibility_warning = _enforce_feasibility(H, h, T)
     L = _wavelength(T, h)
     Lx = L / 2.0  # domain = half wavelength for standing wave
     Nx = grid_points_x
@@ -331,6 +357,7 @@ def build_nonlinear_standing_wave(
         "num_steps": Nsteps,
         "nonlinear": nonlinear,
         "zones": [],  # closed domain — no generation/absorption zones
+        "feasibility_warning": feasibility_warning,
     }
 
     inp = "\n".join([

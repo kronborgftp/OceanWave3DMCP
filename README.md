@@ -109,8 +109,21 @@ Returns all available simulation types with parameter descriptions.
 
 ---
 
+### `check_wave_feasibility(wave_height, water_depth, wave_period)`
+Checks whether a wave is **physically possible** to simulate — without running anything. Returns the governing breaking limit (Miche: H/L ≤ 0.142·tanh(kd)), the wave's steepness, and its margin to that limit; if the wave cannot exist as a steady wave (too tall for its depth/period, or its trough would dig below the seabed) it says so and cites the violated law. Pure physics — works even before the solver is installed, and the same inputs always give the same answer.
+
+| Parameter | Unit | Description |
+|---|---|---|
+| `wave_height` | m | Crest-to-trough wave height H |
+| `water_depth` | m | Still-water depth h |
+| `wave_period` | s | Wave period T |
+
+---
+
 ### `run_simulation(scenario, ...)`
 Runs a simulation and returns statistics.
+
+> **Pre-run feasibility gate.** Before any solver work, `run_simulation` checks the requested wave against the governing physical limits. A physically impossible wave (e.g. a 10 m wave in 1 m of water) is **refused up front** — it returns a `PHYSICALLY IMPOSSIBLE WAVE — SIMULATION REFUSED` message citing the violated law (Miche breaking limit, trough below the seabed, …) and **no run is started**. A wave that is valid but sits within 90–100 % of the breaking limit still runs, with a non-blocking ⚠️ caution prepended to the recap. The check unifies the classic breaking criteria (depth-limited / McCowan, steepness-limited / Michell–Stokes, kinematic, Stokes 120° corner, crest-acceleration, surface overturning) into the single Miche envelope. See [`feasibility.py`](src/oceanwave_mcp/feasibility.py).
 
 **Parameters** (all optional — sensible defaults apply):
 
