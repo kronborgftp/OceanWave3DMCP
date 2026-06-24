@@ -77,6 +77,8 @@ OceanWaveMCP/
 │   ├── visualizer.py      # Deterministic GIF/PNG rendering (matplotlib)
 │   ├── viewer_server.py   # Localhost server: data API + interactive viewer
 │   ├── static/            # viewer.html / viewer.js — the interactive viewer app
+│   ├── octave_viz.py      # Runs OceanWave3D's ReadKinematics.m via Octave (kinematics figures)
+│   ├── kinematics_field.py # Parses Kinematics0N.bin → velocity field + particle orbits (overlays)
 │   ├── installer.py       # Builds OceanWave3D + deps from licensed source tarballs
 │   └── docker_runner.py   # Docker sandbox backend — build the image & run in a container
 ├── docker/                # Dockerfile + .dockerignore for the sandbox image
@@ -180,6 +182,7 @@ Reports build progress: `running`, `succeeded`, `failed`, or `none`, the backend
 | **Cross-section** (default) | Animated η(x) profile drawn as an ocean cross-section: solid blue water below the surface, sand below the seabed, sky above |
 | **Heatmap (x–t)** | The full space-time history at once, with a diverging blue–white–red colormap centred on still-water level (red = above, blue = below) and a colorbar labelled in metres. Click/drag to scrub time |
 | **3D surface** | Perspective-rendered, light-shaded water surface (the 2D profile extruded along y — long-crested), animated over time |
+| **Kinematics** | OceanWave3D's own `ReadKinematics.m` figures (rendered via Octave): the subsurface velocity, velocity-potential and shear profiles. Each panel is downloadable individually or as a ZIP |
 
 ### Annotation toggles
 
@@ -191,12 +194,14 @@ All of these are user-controlled checkboxes on the page:
 - **Person (1.8 m)** — a human silhouette standing on the seabed for instant scale intuition
 - **Units & time** — axes in metres and a `t = … s` timestamp overlay (computed from `timestep_s` × output stride), instead of grid indices and step counts
 - **Plain titles** — auto-generated plain-language titles from the input schema: *"0.08 m waves, 1 s period, 1 m water depth — nonlinear regular wave"* instead of `20260610_155032_viewer_test_streamfunc`
+- **Flow arrows** — animated subsurface velocity field (the run's own `u`/`w` from its `Kinematics0N.bin`, parsed directly — no Octave), drawn on an even grid over the cross-section and coloured by speed, with a min/max arrow length and a contrast halo so direction stays readable. Cross-section view only
+- **Particle orbits** — the looping path each water particle traces over a wave period, integrated from the time-varying velocity field (orbital motion that flattens with depth — the classic kinematics-over-time figure). Real orbits are centimetre-scale, so each loop is magnified about its centre (the factor is labelled on the plot) with a dot animating the cycle. Cross-section view only
 
 ### Comparing runs
 
 The **Runs** panel lists every run from the current session (older on-disk runs behind an *"include runs from earlier sessions"* toggle). Selecting several runs shows each in its own plot side by side, while **everything else is linked**: playback time, play/pause, view mode, all annotation toggles, and (via *Lock scales*) the elevation scale, so amplitudes are directly comparable.
 
-Useful URL parameters: `?compare=id1,id2` (side-by-side), `?view=section|heatmap|surface` (initial view), `?format=png` (open paused on the final snapshot).
+Useful URL parameters: `?compare=id1,id2` (side-by-side), `?view=section|heatmap|surface|kinematics` (initial view), `?format=png` (open paused on the final snapshot).
 
 The classic `animation.gif` / `final.png` files are still rendered and remain available as download links on the page.
 
