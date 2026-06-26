@@ -19,9 +19,15 @@ from oceanwave_mcp.inp_builder import build_inp                           # noqa
 
 SCENARIOS = ["stream_function_wave", "linear_regular_wave", "nonlinear_standing_wave"]
 
+# Scenarios whose wave is generated from the supplied H/h/T — these refuse an
+# impossible request. The nonlinear standing wave is a fixed benchmark that ignores
+# physical inputs entirely, so it does not refuse on them (see the dedicated test
+# below).
+GENERATING_SCENARIOS = ["stream_function_wave", "linear_regular_wave"]
 
-@pytest.mark.parametrize("scenario", SCENARIOS)
-def test_impossible_wave_refused_in_every_scenario(scenario):
+
+@pytest.mark.parametrize("scenario", GENERATING_SCENARIOS)
+def test_impossible_wave_refused_in_generating_scenarios(scenario):
     # 10 m wave in 1 m of water — impossible by every measure.
     with pytest.raises(WaveInfeasibleError) as exc:
         build_inp(scenario, wave_height=10.0, water_depth=1.0, wave_period=4.0)
@@ -30,6 +36,22 @@ def test_impossible_wave_refused_in_every_scenario(scenario):
     assert "REFUSED" in msg
     # the structured result rides along for callers that want it
     assert exc.value.result.feasible is False
+
+
+def test_standing_wave_ignores_physical_inputs_instead_of_refusing():
+    # The standing wave is a fixed benchmark: an "impossible" requested wave is not
+    # refused — it is ignored (and reported), because the requested H/h/T never
+    # reach the hardcoded initial condition.
+    inp, params = build_inp(
+        "nonlinear_standing_wave", wave_height=10.0, water_depth=1.0, wave_period=4.0
+    )
+    assert "<-" in inp
+    assert params["ignored_inputs"] == {
+        "wave_height": 10.0, "water_depth": 1.0, "wave_period": 4.0,
+    }
+    # The reported wave is the fixed benchmark, not the requested one.
+    assert params["wave_height_m"] != 10.0
+    assert params["wavelength_m"] == 2.0
 
 
 def test_infeasible_error_caught_by_value_error_fallback():

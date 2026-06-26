@@ -140,7 +140,7 @@ def test_scale_cases_remain_feasible(H, h, T):
 @pytest.mark.parametrize("H, h, T", [
     (0.08, 1.0, 1.0),    # stream_function_wave default
     (0.002, 2.0, 1.0),   # linear_regular_wave default
-    (0.04, 1.0, 1.0),    # nonlinear_standing_wave default
+    (0.0893, 2.0, 1.13409),  # nonlinear_standing_wave fixed benchmark
 ])
 def test_builder_defaults_are_feasible(H, h, T):
     assert check_feasibility(H, h, T).feasible is True

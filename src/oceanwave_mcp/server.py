@@ -234,11 +234,13 @@ def run_simulation(
         One of the scenario names returned by list_scenarios().
         E.g. "stream_function_wave", "linear_regular_wave", "nonlinear_standing_wave".
     wave_height : float, optional
-        Wave height H in metres (crest to trough).
+        Wave height H in metres (crest to trough). Ignored by
+        nonlinear_standing_wave, which is a fixed benchmark (any value supplied is
+        reported back as an ignored input).
     water_depth : float, optional
-        Still-water depth h in metres.
+        Still-water depth h in metres. Ignored by nonlinear_standing_wave.
     wave_period : float, optional
-        Wave period T in seconds.
+        Wave period T in seconds. Ignored by nonlinear_standing_wave.
     domain_length : float, optional
         Horizontal domain length Lx in metres. Auto-computed from wave
         parameters if omitted.
@@ -379,6 +381,30 @@ def _format_recap(result: RunResult) -> str:
     # commentary, so it's exempt from the "no text before the recap" rule.
     warning = p.get("feasibility_warning")
     warn_lines = [f"> ⚠️ **Near breaking limit:** {warning}", ""] if warning else []
+
+    # Fixed-benchmark scenarios (e.g. the Agnon & Glozman standing wave) have an
+    # intrinsic H/L/depth/period the caller cannot change. State that, and if the
+    # caller supplied physical inputs that were ignored, say so loudly rather than
+    # letting the recap imply those values shaped the wave. Like the feasibility
+    # warning, these are part of the recap — not extra commentary.
+    benchmark = p.get("fixed_benchmark")
+    if benchmark:
+        warn_lines += [
+            f"> ℹ️ **Fixed benchmark ({benchmark}):** wave height, wavelength, depth "
+            f"and period are intrinsic to this standing-wave reference solution and "
+            f"are not configurable. Only grid resolution, duration and the "
+            f"linear/nonlinear flag can be set.",
+            "",
+        ]
+    ignored = p.get("ignored_inputs") or {}
+    if ignored:
+        shown = ", ".join(f"{k}={v}" for k, v in ignored.items())
+        warn_lines += [
+            f"> ⚠️ **Ignored inputs:** you supplied {shown}, but this scenario uses a "
+            f"fixed profile (H={p.get('wave_height_m')} m, λ={p.get('wavelength_m')} m, "
+            f"depth={p.get('water_depth_m')} m). Those values were not applied.",
+            "",
+        ]
 
     lines = warn_lines + [
         f"## OceanWave3D — {scenario_name}",

@@ -68,18 +68,20 @@ SCENARIOS = {
     "nonlinear_standing_wave": {
         "description": (
             "Nonlinear standing wave (1D / 2D) — a classic benchmark for verifying "
-            "numerical accuracy. No generation zones; the initial condition is a "
-            "nonlinear standing wave profile. "
-            "Typical parameters: amplitude 0.01–0.1 m, depth 0.5–2 m."
+            "numerical accuracy. This is the FIXED Agnon & Glozman (1996) reference "
+            "solution: its wave height (H≈0.089 m), wavelength (L=2 m), depth "
+            "(h=2 m, deep water kh=2π) and period (T≈1.134 s) are intrinsic to the "
+            "solver's hardcoded initial condition and are NOT configurable. The only "
+            "adjustable settings are grid resolution, duration, and whether the "
+            "evolution uses the linear or fully nonlinear equations. Supplying "
+            "wave_height / water_depth / wave_period has no effect; any such value "
+            "is reported back as an ignored input rather than silently dropped."
         ),
         "parameters": {
-            "wave_height":   "Wave height H [m] (twice the amplitude). Default: 0.04",
-            "water_depth":   "Still-water depth h [m]. Default: 1.0",
-            "wave_period":   "Wave period T [s] (sets domain length = L/2). Default: 1.0",
             "grid_points_x": "Number of horizontal grid points Nx. Default: 33",
             "vertical_layers": "Number of vertical grid layers Nz. Default: 9",
             "num_periods":   "Simulation duration in wave periods. Default: 10",
-            "nonlinear":     "True = fully nonlinear. Default: True",
+            "nonlinear":     "True = fully nonlinear evolution, False = linear. Default: True",
         },
     },
 }
@@ -321,20 +323,52 @@ def build_linear_regular_wave(
     return inp, params
 
 
+# Nonlinear standing wave — FIXED Agnon & Glozman (1996) benchmark.
+#
+# The solver's initial-condition routine (nonlinearstandingwave1D.f90, selected by
+# IC=1 in SetupInitialConditions.f90 CASE(1)) hardcodes this exact profile: a fixed
+# Fourier series with wavenumber k=pi (=> L=2 m), with the depth forced to 2 m
+# (kh=2*pi, deep water). The wave height is NOT an argument of that routine, so
+# wave_height/water_depth/wave_period cannot influence the simulated wave. The old
+# builder still wrote H/h onto a .inp line the standing-wave path never reads, so
+# those inputs were silently dropped. Instead we now emit a domain/depth that match
+# the benchmark, report the real fixed values, and echo any supplied physical input
+# back as an explicit "ignored" notice (see params["ignored_inputs"]).
+_NLSTANDING_H = 0.0893         # wave height H [m]  (0.08934064760240 in the reference)
+_NLSTANDING_DEPTH = 2.0        # still-water depth h [m]  (kh = 2*pi -> deep water)
+_NLSTANDING_WAVELENGTH = 2.0   # wavelength L [m]  (k = pi)
+_NLSTANDING_PERIOD = 1.13409   # wave period T [s]  (reference value)
+
+
 def build_nonlinear_standing_wave(
-    wave_height: float = 0.04,
-    water_depth: float = 1.0,
-    wave_period: float = 1.0,
     grid_points_x: int = 33,
     vertical_layers: int = 9,
     num_periods: float = 10.0,
     nonlinear: bool = True,
+    *,
+    wave_height: Optional[float] = None,
+    water_depth: Optional[float] = None,
+    wave_period: Optional[float] = None,
+    domain_length: Optional[float] = None,
 ) -> tuple[str, dict]:
-    """Return (inp_content, resolved_params) for a nonlinear standing wave simulation."""
-    H, h, T = wave_height, water_depth, wave_period
-    feasibility_warning = _enforce_feasibility(H, h, T)
-    L = _wavelength(T, h)
-    Lx = L / 2.0  # domain = half wavelength for standing wave
+    """Return (inp_content, resolved_params) for the nonlinear standing-wave benchmark.
+
+    This scenario reproduces the fixed Agnon & Glozman (1996) standing wave. Its
+    height, wavelength, depth and period are intrinsic to that reference solution
+    and are NOT configurable: the solver's IC routine hardcodes the profile
+    (k=pi -> L=2 m, kh=2*pi -> h=2 m, H≈0.0893 m, T≈1.134 s). The physical
+    arguments (wave_height, water_depth, wave_period, domain_length) are accepted
+    for call-compatibility but ignored; any supplied value is returned in
+    params["ignored_inputs"] (and surfaced in the recap) rather than silently
+    dropped. The real knobs are grid resolution, duration and the nonlinear flag.
+    """
+    H = _NLSTANDING_H
+    h = _NLSTANDING_DEPTH
+    T = _NLSTANDING_PERIOD
+    L = _NLSTANDING_WAVELENGTH
+    # One full wavelength: an integer-metre domain so the hardcoded cos(pi*x) IC
+    # has zero surface slope at both walls (the closed-box boundary condition).
+    Lx = L
     Nx = grid_points_x
     Nz = max(vertical_layers, _MIN_NZ)
 
@@ -343,13 +377,27 @@ def build_nonlinear_standing_wave(
     stride = max(2, Nsteps // 100)
     nonlinear_flag = 1 if nonlinear else 0
 
+    # Echo — rather than silently drop — any physical inputs the caller passed.
+    # They never reach the hardcoded IC, so the honest thing is to report them as
+    # ignored instead of pretending they shaped the wave.
+    ignored_inputs = {
+        name: value
+        for name, value in (
+            ("wave_height", wave_height),
+            ("water_depth", water_depth),
+            ("wave_period", wave_period),
+            ("domain_length", domain_length),
+        )
+        if value is not None
+    }
+
     params = {
         "scenario": "nonlinear_standing_wave",
         "wave_height_m": H,
         "water_depth_m": h,
         "wave_period_s": T,
-        "wavelength_m": round(L, 4),
-        "domain_length_m": round(Lx, 4),
+        "wavelength_m": L,
+        "domain_length_m": Lx,
         "grid_points_x": Nx,
         "vertical_layers": Nz,
         "num_periods": num_periods,
@@ -357,18 +405,20 @@ def build_nonlinear_standing_wave(
         "num_steps": Nsteps,
         "nonlinear": nonlinear,
         "zones": [],  # closed domain — no generation/absorption zones
-        "feasibility_warning": feasibility_warning,
+        "feasibility_warning": None,  # fixed benchmark is feasible by construction
+        "fixed_benchmark": "Agnon & Glozman (1996)",
+        "ignored_inputs": ignored_inputs,
     }
 
     inp = "\n".join([
-        f"Nonlinear standing wave  H={H:.3f}m  h={h:.3f}m  T={T:.3f}s",
+        f"Nonlinear standing wave (Agnon-Glozman 1996)  H={H:.4f}m  h={h:.3f}m  T={T:.4f}s",
         f"1  0 <-",
         f"{Lx:.4f} 1. {h:.3f} {Nx} 1 {Nz} 0 0 1 1 1 1 <-",
         f"3 3 3 1 1 1 <-",
         f"{Nsteps} {dt:.10f} 1 0 1 <-",
         f"9.82 <-",
         f"1 1 0 23 1e-8 1e-6 1 V 1 1 20 <-",
-        f"{H:.4f} {h:.4f} 1.0 {T:.4f} 0 0. 1 6 24 <-",
+        f"{H:.4f} {h:.4f} {L:.4f} {T:.4f} 0 0. 1 6 24 <-",
         f"-{stride} 20 1 1 <-",
         f"1 {Nx} 1 1 1 1 1 {Nsteps} 1 <-",
         f"{nonlinear_flag} 0 <-",
